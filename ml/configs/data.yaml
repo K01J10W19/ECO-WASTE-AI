@@ -1,0 +1,16 @@
+# Ultralytics YOLO dataset config.
+# Paths are relative to this file's parent (ml/). We finalise these in Step 2
+# after downloading & validating the Kaggle "garbage-detection" dataset.
+path: ../data/garbage-detection      # dataset root
+train: images/train
+val: images/val
+test: images/test                    # optional
+
+# Class order MUST match config.py CLASS_NAMES and the label files.
+names:
+  0: Biodegradable
+  1: Cardboard
+  2: Glass
+  3: Metal
+  4: Paper
+  5: Plastic

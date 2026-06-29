@@ -1,0 +1,106 @@
+# =============================================================================
+# SECURITY — secrets & credentials (NEVER commit these)
+# Anything matching the lines below is kept out of version control to prevent
+# leaking API keys, tokens, or private data. .env.example is the ONLY env file
+# that is allowed in git (it holds blank placeholder values).
+# =============================================================================
+.env
+.env.*
+*.env
+!.env.example
+secrets/
+*.secret
+*.secrets
+secrets.json
+secrets.yaml
+secrets.yml
+credentials.json
+credentials.yaml
+service-account*.json
+client_secret*.json
+
+# Private keys / certificates
+*.pem
+*.key
+*.crt
+*.cer
+*.der
+*.p12
+*.pfx
+*.keystore
+*.jks
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+*.ppk
+
+# Cloud / tooling credential caches
+.aws/
+.azure/
+.gcloud/
+.netrc
+.htpasswd
+
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+build/
+dist/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# =============================================================================
+# ML artifacts & datasets (large / regenerable / licensed data — never commit)
+# =============================================================================
+ml/runs/
+ml/data/
+ml/notebooks/.ipynb_checkpoints/
+*.pt
+*.pth
+*.onnx
+*.engine
+*.weights
+*.h5
+*.pb
+*.tflite
+!models/.gitkeep
+
+# =============================================================================
+# App runtime (user uploads, generated databases, instance config)
+# =============================================================================
+app/static/uploads/*
+!app/static/uploads/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+instance/
+
+# =============================================================================
+# Logs & temp
+# =============================================================================
+*.log
+logs/
+*.tmp
+*.bak
+
+# =============================================================================
+# OS / IDE
+# =============================================================================
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,24 @@
+# ---- Web framework ----
+Flask==3.0.3
+Flask-SQLAlchemy==3.1.1
+python-dotenv==1.0.1
+requests==2.32.3
+
+# ---- ML / Computer Vision (inference side) ----
+# NOTE: install the CUDA build of torch separately for your GTX 1650.
+# See README "GPU setup". ultralytics pulls torch automatically but the
+# CPU wheel — we override it during setup.
+ultralytics==8.3.0
+opencv-python-headless==4.10.0.84
+pillow==10.4.0
+numpy==1.26.4
+
+# ---- Validation ----
+pydantic==2.9.2
+
+# ---- Testing ----
+pytest==8.3.3
+pytest-mock==3.14.0
+
+# ---- Production server (deployment) ----
+gunicorn==23.0.0
