@@ -1,16 +1,32 @@
-# Ultralytics YOLO dataset config.
-# Paths are relative to this file's parent (ml/). We finalise these in Step 2
-# after downloading & validating the Kaggle "garbage-detection" dataset.
-path: ../data/garbage-detection      # dataset root
-train: images/train
-val: images/val
-test: images/test                    # optional
+# ml/configs/data.yaml
+# Finalised from inspect_dataset.py output - Step 2.
+#
+# Class order is LOCKED to the dataset's own data.yaml (viswaprakash1990/garbage-detection).
+# DO NOT reorder - YOLO label indices must match exactly.
+#
+# Note: dataset uses ALL-CAPS names. The web app maps these to friendly
+# display names via APP_CLASS_DISPLAY_NAMES in config.py.
 
-# Class order MUST match config.py CLASS_NAMES and the label files.
+path: ../data/GARBAGE CLASSIFICATION   # dataset root (relative to ml/configs/)
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 6
 names:
-  0: Biodegradable
-  1: Cardboard
-  2: Glass
-  3: Metal
-  4: Paper
-  5: Plastic
+  0: BIODEGRADABLE
+  1: CARDBOARD
+  2: GLASS
+  3: METAL
+  4: PAPER
+  5: PLASTIC
+
+# Class balance (box instances from inspect_dataset.py):
+#   BIODEGRADABLE : 45407  (65% - dominant class, watch for bias)
+#   CARDBOARD     :  4698  ( 7%)
+#   GLASS         :  7809  (11%)
+#   METAL         :  5841  ( 8%)
+#   PAPER         :  4390  ( 6% - smallest class)
+#   PLASTIC       :  5945  ( 9%)
+# Imbalance ratio ~10:1 (BIODEGRADABLE vs PAPER).
+# Step 3 training must compensate via augmentation + class_weights or mosaic.

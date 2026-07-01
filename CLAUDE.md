@@ -34,6 +34,7 @@ When you (Claude Code) join, assume the following are already settled. Do **not*
 | Backend | **Flask** (app factory + blueprints + services) | Matches the architecture diagram. Thin controllers, logic in services. |
 | Frontend | HTML5 + Tailwind CSS + native JS (ES6+, Fetch API) + GSAP | Single-page app, drag-drop upload, bounding-box canvas, dynamic forms. |
 | Database | SQLite (optional, for scan history) | Lightweight, local, file-based. |
+| Dataset | **`viswaprakash1990/garbage-detection`** (Kaggle) | Already in YOLO format. 10,464 images, pre-split, zero orphans, zero malformed labels (confirmed by `inspect_dataset.py`). See §7. |
 
 ---
 
@@ -113,19 +114,21 @@ waste-detection-app/
 │       └── index.html
 ├── ml/                   # TRAINING workspace (separate lifecycle from the app)
 │   ├── data/             # dataset (gitignored)
-│   ├── configs/data.yaml # Ultralytics dataset config
+│   ├── configs/data.yaml # Ultralytics dataset config (finalised Step 2)
 │   ├── scripts/
-│   │   ├── prepare_dataset.py
-│   │   ├── train.py
-│   │   ├── evaluate.py
-│   │   └── export.py
+│   │   ├── inspect_dataset.py   # dataset audit / class balance  (DONE)
+│   │   ├── prepare_dataset.py   # validation + data.yaml         (DONE, Step 2)
+│   │   ├── train.py             # transfer learning              (Step 3)
+│   │   ├── evaluate.py          # metrics + confusion matrix     (Step 4)
+│   │   └── export.py            # export .pt / ONNX              (Step 4)
 │   ├── notebooks/
 │   └── runs/             # training outputs (gitignored)
 ├── models/
-│   └── best.pt           # exported weights the APP loads at inference
+│   └── best.pt           # exported weights the APP loads (gitignored until trained)
 ├── tests/
 │   ├── conftest.py       # pytest fixtures (app, client)
 │   ├── test_api.py
+│   ├── test_prepare_dataset.py
 │   ├── test_detection.py
 │   └── test_carbon.py
 └── docs/                 # FYP report material
@@ -135,31 +138,80 @@ waste-detection-app/
 
 ---
 
-## 6. The Six Waste Classes
+## 6. LOCKED: The Six Waste Classes
 
-Fixed list. The order below is the canonical class index order and MUST match `config.py:CLASS_NAMES`, the YOLO `data.yaml`, and the label files exactly.
+Confirmed by `inspect_dataset.py` against the real dataset. **This order is immutable.**
+`config.py`, `ml/configs/data.yaml`, and every label file use this exact order and these exact
+ALL-CAPS names.
 
 ```
-0: Biodegradable
-1: Cardboard
-2: Glass
-3: Metal
-4: Paper
-5: Plastic
+0: BIODEGRADABLE
+1: CARDBOARD
+2: GLASS
+3: METAL
+4: PAPER
+5: PLASTIC
+```
+
+The model uses the ALL-CAPS names **internally**; the web UI always shows the **friendly
+display name** via this mapping in `config.py`:
+
+```python
+APP_CLASS_DISPLAY_NAMES = {
+    "BIODEGRADABLE": "Biodegradable",
+    "CARDBOARD":     "Cardboard",
+    "GLASS":         "Glass",
+    "METAL":         "Metal",
+    "PAPER":         "Paper",
+    "PLASTIC":       "Plastic",
+}
 ```
 
 ---
 
-## 7. Module Specifications
+## 7. LOCKED: Dataset Facts (from inspection)
+
+Established by `ml/scripts/inspect_dataset.py` on the real download. Treat as ground truth.
+
+| Property | Value |
+|---|---|
+| Dataset root | `ml/data/GARBAGE CLASSIFICATION/` (note the space — always quote the path) |
+| Splits | Already split: `train/` `valid/` `test/` |
+| Total images | 10,464 |
+| Total labels | 10,464 (perfect 1:1 match) |
+| Orphan images | 0 |
+| Orphan labels | 0 |
+| Malformed lines | 0 |
+| Label format | YOLO (confirmed) |
+| Source | Roboflow `material-identification/garbage-classification-3` v2 (CC BY 4.0) |
+
+**Class balance (box instances):**
+
+| ID | Class | Boxes | Share |
+|---|---|---|---|
+| 0 | BIODEGRADABLE | 45,407 | 65% |
+| 1 | CARDBOARD | 4,698 | 7% |
+| 2 | GLASS | 7,809 | 11% |
+| 3 | METAL | 5,841 | 8% |
+| 4 | PAPER | 4,390 | 6% |
+| 5 | PLASTIC | 5,945 | 9% |
+
+Imbalance ratio ~10:1 (BIODEGRADABLE vs PAPER). **Step 3 MUST compensate:** mosaic +
+copy-paste augmentation, and monitor **per-class AP**. BIODEGRADABLE will converge fastest;
+watch PAPER and CARDBOARD for underfitting.
+
+---
+
+## 8. Module Specifications
 
 ### Module 1 — AI Multi-Target Waste Detection (Standalone YOLO)
 - **Goal:** Train a single-stage YOLO11 model to localise + classify multiple waste items in cluttered, real-world images.
 - **Input:** user-uploaded image (complex background, single or multiple targets).
 - **Output:** array of `{ class, confidence, bbox:[x1,y1,x2,y2] }`.
-- **Dataset:** Kaggle `viswaprakash1990/garbage-detection`.
+- **Dataset:** Kaggle `viswaprakash1990/garbage-detection` (see §7 for locked facts).
 - **Tasks:** dataset validation + YAML mapping; real-time augmentation (spatial transforms, colour jitter, mosaic); transfer learning from `yolo11n.pt` tuned for 4 GB VRAM; validation + checkpointing; export to `.pt` / ONNX.
 - **Evaluation metrics:** mAP@0.5, mAP@0.5:0.95, precision, recall, F1-score, confusion matrix.
-- **GTX 1650 guidance:** start with `imgsz=640`, small `batch` (e.g. 4–8, tune down if OOM), `model=yolo11n.pt`, mixed precision on. Reduce batch before reducing image size if memory errors occur.
+- **GTX 1650 guidance:** start with `imgsz=640`, `batch=8` (drop to 4 if OOM), `model=yolo11n.pt`, mixed precision on. Reduce batch before reducing image size if memory errors occur.
 
 ### Module 2 — Carbon Impact Estimation (External API, NO ML)
 - After detection, ask the user (per item) for estimated weight (kg) and a geographic location (ISO country code, e.g. `MY`).
@@ -182,7 +234,7 @@ Fixed list. The order below is the canonical class index order and MUST match `c
 
 ---
 
-## 8. Coding Conventions & Best Practices
+## 9. Coding Conventions & Best Practices
 
 - **Thin controllers:** route handlers in `blueprints/` only validate input, call a service, and return JSON. No business logic in routes.
 - **Services own logic:** all detection / carbon / recommendation logic lives in `app/services/`. Services are import-safe and unit-testable in isolation.
@@ -198,7 +250,7 @@ Fixed list. The order below is the canonical class index order and MUST match `c
 
 ---
 
-## 9. Environment Variables (`.env`)
+## 10. Environment Variables (`.env`)
 
 ```
 FLASK_ENV=development
@@ -223,7 +275,7 @@ Notes:
 
 ---
 
-## 10. Common Commands
+## 11. Common Commands
 
 > Windows / PowerShell. Do NOT use `&&` or `source`.
 
@@ -249,8 +301,15 @@ pytest -q
 # Verify GPU is visible
 python -c "import torch; print(torch.cuda.is_available())"   # expect True
 
-# Training (ml/ scripts — filled in over Steps 2–4)
+# Dataset download (Kaggle CLI)
+python -m kaggle datasets download -d viswaprakash1990/garbage-detection -p ml/data --unzip
+
+# Dataset scripts (Step 2)
+python ml/scripts/inspect_dataset.py
+python ml/scripts/prepare_dataset.py --dry-run
 python ml/scripts/prepare_dataset.py
+
+# ML pipeline (Steps 3–4)
 python ml/scripts/train.py
 python ml/scripts/evaluate.py
 python ml/scripts/export.py
@@ -260,20 +319,24 @@ python ml/scripts/export.py
 
 ---
 
-## 11. Build Roadmap (8 steps)
+## 12. Build Roadmap
 
-1. **Project foundation** — DONE. Folder structure, app factory, config, error handling, DB model, test harness. App boots; `/api/health` returns 200; tests pass.
-2. **Dataset prep & validation** — download Kaggle set, verify/convert labels to YOLO format, finalise `data.yaml`, check class balance.
-3. **YOLO training** — transfer learning from `yolo11n.pt`, augmentation, GTX-1650-safe hyperparameters, checkpointing.
-4. **Evaluation + export + detection service** — compute metrics, export weights, implement `detection_service.py` and `POST /api/predict`.
-5. **Carbon module** — `carbon_service.py` (Climatiq adapter) + `POST /api/calculate-impact`.
-6. **Recommendation module** — rule-based engine + optional LLM enrichment.
-7. **Frontend** — drag-drop upload, bounding-box canvas, dynamic weight forms, results dashboard (Tailwind + JS + GSAP).
-8. **Testing, deployment, FYP documentation** — full test suite, gunicorn deployment guide, report-ready docs.
+Each completed step gets its own commit + push — see §15 for the commit convention.
+
+| Step | Description | Status |
+|---|---|---|
+| 1 | Project foundation — factory, config, blueprints, DB, errors, tests | **DONE** |
+| 2 | Dataset prep — inspection, validation, `data.yaml`, balance report | **DONE** |
+| 3 | YOLO training — transfer learning, augmentation, GTX-1650 settings | **Next** |
+| 4 | Evaluation + export + `detection_service` + `POST /api/predict` | Pending |
+| 5 | Carbon module — `carbon_service` + `POST /api/calculate-impact` | Pending |
+| 6 | Recommendation module — rule-based + optional LLM enrichment | Pending |
+| 7 | Frontend — drag-drop, bounding-box canvas, weight forms, results dashboard | Pending |
+| 8 | Full test suite, gunicorn deployment guide, FYP documentation | Pending |
 
 ---
 
-## 12. Deliverables Checklist
+## 13. Deliverables Checklist
 
 - [ ] Upload multi-object real-world images via a responsive drop-zone.
 - [ ] Auto-draw bounding boxes over detected waste in the UI.
@@ -286,25 +349,27 @@ python ml/scripts/export.py
 
 ---
 
-## 13. Gotchas & Guardrails for Claude Code
+## 14. Gotchas & Guardrails for Claude Code
 
 - **Never** suggest Python 3.13 or bash-only commands for this Windows/PowerShell user.
 - **Never** write `yolov11n.pt`; it's `yolo11n.pt`.
 - **Never** put business logic in route handlers — services only.
-- **Never** commit `.env`, model weights, or the dataset.
+- **Never** commit `.env`, model weights (`*.pt`), or the dataset (`ml/data/`).
 - **Never** make tests depend on the network or a GPU — mock external APIs.
+- **Never** reorder the class list — `0:BIODEGRADABLE` … `5:PLASTIC` is locked to the dataset (§6).
 - The app must run end-to-end **without** an LLM key (rule-based fallback).
 - Respect the 4 GB VRAM limit: prefer the `n` (nano) model, modest batch sizes, mixed precision; reduce batch before image size on OOM.
 - Keep carbon estimation free of any trained model — it's API-only by design.
+- Dataset folder name contains a space (`"GARBAGE CLASSIFICATION"`) — always quote the path.
 - When adding a dependency, pin its version in `requirements.txt`.
 
 ---
 
-## 14. Git, Security & Commit Workflow
+## 15. Git, Security & Commit Workflow
 
 **Remote:** `https://github.com/K01J10W19/ECO-WASTE-AI.git` (default branch: `main`).
 
-### 14.1 Security — never leak secrets or data
+### 15.1 Security — never leak secrets or data
 - **`.gitignore` is the safety net, not the only check.** Before every commit, run
   `git status` and visually confirm no secret/data file is staged.
 - The following must **never** enter version control (all covered by `.gitignore`):
@@ -318,8 +383,8 @@ python ml/scripts/export.py
 - `.env.example` documents required keys with **empty** values — keep it in sync with real
   env needs, but never copy real values into it.
 
-### 14.2 Commit convention — one commit per completed roadmap step
-Each completed step in the **Build Roadmap (§11)** gets its own commit. The message
+### 15.2 Commit convention — one commit per completed roadmap step
+Each completed step in the **Build Roadmap (§12)** gets its own commit. The message
 describes the action performed (what was built and why it satisfies that step):
 
 ```
@@ -327,7 +392,7 @@ Step <N>: <short action title>
 
 - <bullet describing what was implemented>
 - <bullet describing key files / decisions>
-- Roadmap §11 Step <N> complete; deliverables: <which §12 items this advances>
+- Roadmap §12 Step <N> complete; deliverables: <which §13 items this advances>
 ```
 
 Example:
@@ -337,10 +402,10 @@ Step 1: Project foundation — app factory, config, error handling, tests
 - create_app() factory + class-based config (Dev/Prod/Testing)
 - Blueprints (main SPA shell + JSON api), /api/health returns 200
 - ApiError + registered JSON error handler; pytest harness green
-- Roadmap §11 Step 1 complete
+- Roadmap §12 Step 1 complete
 ```
 
-### 14.3 Push workflow (Windows / PowerShell)
+### 15.3 Push workflow (Windows / PowerShell)
 ```powershell
 # one-time
 git init

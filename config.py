@@ -31,7 +31,18 @@ class BaseConfig:
     MODEL_PATH = os.getenv("MODEL_PATH", os.path.join(BASE_DIR, "models", "best.pt"))
     CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", 0.35))
     # The fixed class list the model is trained on (order matters for YOLO).
-    CLASS_NAMES = ["Biodegradable", "Cardboard", "Glass", "Metal", "Paper", "Plastic"]
+    # ALL-CAPS to match the dataset's data.yaml and ml/configs/data.yaml exactly
+    # (LOCKED — see CLAUDE.md §6 & §7). The model uses these names internally.
+    CLASS_NAMES = ["BIODEGRADABLE", "CARDBOARD", "GLASS", "METAL", "PAPER", "PLASTIC"]
+    # The web UI never shows the raw ALL-CAPS name — it maps to a friendly label.
+    APP_CLASS_DISPLAY_NAMES = {
+        "BIODEGRADABLE": "Biodegradable",
+        "CARDBOARD": "Cardboard",
+        "GLASS": "Glass",
+        "METAL": "Metal",
+        "PAPER": "Paper",
+        "PLASTIC": "Plastic",
+    }
 
     # --- Carbon API ---
     CARBON_PROVIDER = os.getenv("CARBON_PROVIDER", "climatiq")
