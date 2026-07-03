@@ -30,6 +30,9 @@ class BaseConfig:
     # --- Model / inference ---
     MODEL_PATH = os.getenv("MODEL_PATH", os.path.join(BASE_DIR, "models", "best.pt"))
     CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", 0.35))
+    # Device used for inference at serving time. "cpu" is the safe default for a
+    # web server (no CUDA needed, no contention); set to "0" to use GPU 0.
+    INFERENCE_DEVICE = os.getenv("INFERENCE_DEVICE", "cpu")
     # The fixed class list the model is trained on (order matters for YOLO).
     # ALL-CAPS to match the dataset's data.yaml and ml/configs/data.yaml exactly
     # (LOCKED — see CLAUDE.md §6 & §7). The model uses these names internally.

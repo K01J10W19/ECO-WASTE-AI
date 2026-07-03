@@ -118,6 +118,7 @@ waste-detection-app/
 │   ├── scripts/
 │   │   ├── inspect_dataset.py   # dataset audit / class balance  (DONE)
 │   │   ├── prepare_dataset.py   # validation + data.yaml         (DONE, Step 2)
+│   │   ├── restratify_dataset.py# class-balanced 80/10/10 re-split (Step 4 split fix)
 │   │   ├── train.py             # transfer learning              (Step 3)
 │   │   ├── evaluate.py          # metrics + confusion matrix     (Step 4)
 │   │   └── export.py            # export .pt / ONNX              (Step 4)
@@ -175,8 +176,9 @@ Established by `ml/scripts/inspect_dataset.py` on the real download. Treat as gr
 
 | Property | Value |
 |---|---|
-| Dataset root | `ml/data/GARBAGE CLASSIFICATION/` (note the space — always quote the path) |
-| Splits | Already split: `train/` `valid/` `test/` |
+| Dataset root (original) | `ml/data/GARBAGE CLASSIFICATION/` (note the space — always quote the path) |
+| Dataset root (TRAINING) | `ml/data/garbage_stratified/` — class-balanced re-split that `data.yaml` now points at (see split-fix note below) |
+| Splits | Original ships `train/ valid/ test/`, but its **class distribution is broken** (see below); training/eval uses the re-stratified copy |
 | Total images | 10,464 |
 | Total labels | 10,464 (perfect 1:1 match) |
 | Orphan images | 0 |
@@ -197,8 +199,20 @@ Established by `ml/scripts/inspect_dataset.py` on the real download. Treat as gr
 | 5 | PLASTIC | 5,945 | 9% |
 
 Imbalance ratio ~10:1 (BIODEGRADABLE vs PAPER). **Step 3 MUST compensate:** mosaic +
-copy-paste augmentation, and monitor **per-class AP**. BIODEGRADABLE will converge fastest;
-watch PAPER and CARDBOARD for underfitting.
+mixup augmentation (`copy_paste` is a no-op for bbox-only data), and monitor **per-class AP**.
+BIODEGRADABLE will converge fastest; watch PAPER and CARDBOARD for underfitting.
+
+**CRITICAL — the shipped split is broken (found in Step 4 eval).** The original Roboflow
+`train/valid/test` split has severe class distribution shift: PAPER = train 2,981 / valid **33**
+/ test 1,376; PLASTIC = valid **1.1%** / test **44%**; GLASS has **0** test images. This makes
+minority-class *validation* metrics meaningless — PAPER "mAP" was measured on 33 boxes (→ 0.036),
+yet the same model scores **0.58** on test's 1,376 PAPER boxes. The headline 51% val mAP was an
+artifact; the model's true mAP50 is ~0.65. **Resolution:** `ml/scripts/restratify_dataset.py`
+merges all three splits and writes a fresh, class-balanced 80/10/10 split to
+`ml/data/garbage_stratified/` (each class ≈ its global share in every split), then repoints
+`ml/configs/data.yaml`. The original folder is left untouched. **Always train/evaluate on the
+stratified split**; re-run the script if the dataset is re-downloaded. The box-count table above
+is unchanged (those are dataset-wide totals).
 
 ---
 
@@ -211,7 +225,9 @@ watch PAPER and CARDBOARD for underfitting.
 - **Dataset:** Kaggle `viswaprakash1990/garbage-detection` (see §7 for locked facts).
 - **Tasks:** dataset validation + YAML mapping; real-time augmentation (spatial transforms, colour jitter, mosaic); transfer learning from `yolo11n.pt` tuned for 4 GB VRAM; validation + checkpointing; export to `.pt` / ONNX.
 - **Evaluation metrics:** mAP@0.5, mAP@0.5:0.95, precision, recall, F1-score, confusion matrix.
-- **GTX 1650 guidance:** start with `imgsz=640`, `batch=8` (drop to 4 if OOM), `model=yolo11n.pt`, mixed precision on. Reduce batch before reducing image size if memory errors occur.
+- **GTX 1650 guidance:** start with `imgsz=640`, `batch=8` (drop to 4 if OOM), `model=yolo11n.pt`. **Keep AMP OFF (`amp=False`)** — the GTX 16-series produces NaN losses under FP16; FP32 batch=8 fits in ~2.8 GB (verified). Reduce batch before reducing image size if memory errors occur.
+- **Step 3 training (DONE):** launch with `python ml/scripts/train.py` (CLI overrides: `--epochs --batch --imgsz --device --amp/--no-amp --resume`; `--resume` continues from `ml/runs/waste_yolo11n/weights/last.pt`). Final CFG: `model=yolo11n.pt`, `data=ml/configs/data.yaml`, `epochs=50`, `imgsz=640`, `batch=8`, `device=0` (auto-falls-back to `cpu` if no CUDA), `workers=2`, `amp=False` (FP32 — GTX 16-series NaN under FP16; batch=8 peaks ~2.8 GB), `patience=15`, `save_period=5`; augmentation `mosaic=1.0`, `mixup=0.1`, `close_mosaic=10`, `degrees=10`, `flipud=0.3`, `fliplr=0.5`, `translate=0.1`, `scale=0.5`, `hsv_h/s/v=0.015/0.7/0.4`. **No `copy_paste`** — it is a no-op on bbox-only data. Expected time on the GTX 1650: **~6–8 h for 50 epochs** (~8 min/epoch in FP32; early stopping at `patience=15` often ends it sooner). Outputs land in `ml/runs/waste_yolo11n/weights/best.pt` (plus `last.pt`).
+- **Step 4 evaluation + serving (DONE):** `evaluate.py` (metrics on the TEST split), `export.py` (copies chosen weights → `models/best.pt`, verifies locked class order), `detection_service.run_detection` (cached singleton model, never per-request), and thin `POST /api/predict`. **Production model = `waste_yolo11n_v2`** (trained on the stratified split). **Held-out TEST metrics:** overall **mAP50 0.671**, mAP50-95 0.467, precision 0.774, recall 0.567, F1 0.655. Per-class mAP50: GLASS 0.795, METAL 0.698, PLASTIC 0.695, PAPER 0.672, BIODEGRADABLE 0.628, CARDBOARD 0.541. Artifacts in `ml/runs/waste_yolo11n_v2/eval/` (metrics.json/csv + confusion_matrix.png). Recall is the weak axis (precise but misses ~43% of objects); the biggest future accuracy lever is a larger model (`yolo11s`, try `--batch 4` on 4 GB) — do it as a separate optional run, not by resuming.
 
 ### Module 2 — Carbon Impact Estimation (External API, NO ML)
 - After detection, ask the user (per item) for estimated weight (kg) and a geographic location (ISO country code, e.g. `MY`).
@@ -265,6 +281,7 @@ LLM_MODEL=claude-sonnet-4-6
 
 MODEL_PATH=models/best.pt
 CONFIDENCE_THRESHOLD=0.35
+INFERENCE_DEVICE=cpu              # "cpu" (safe default for serving) or "0" for GPU 0
 DATABASE_URL=sqlite:///waste_app.db
 ```
 
@@ -309,6 +326,10 @@ python ml/scripts/inspect_dataset.py
 python ml/scripts/prepare_dataset.py --dry-run
 python ml/scripts/prepare_dataset.py
 
+# Fix the broken class split (Step 4) -> ml/data/garbage_stratified/ + repoint data.yaml
+python ml/scripts/restratify_dataset.py --dry-run
+python ml/scripts/restratify_dataset.py
+
 # ML pipeline (Steps 3–4)
 python ml/scripts/train.py
 python ml/scripts/evaluate.py
@@ -327,9 +348,9 @@ Each completed step gets its own commit + push — see §15 for the commit conve
 |---|---|---|
 | 1 | Project foundation — factory, config, blueprints, DB, errors, tests | **DONE** |
 | 2 | Dataset prep — inspection, validation, `data.yaml`, balance report | **DONE** |
-| 3 | YOLO training — transfer learning, augmentation, GTX-1650 settings | **Next** |
-| 4 | Evaluation + export + `detection_service` + `POST /api/predict` | Pending |
-| 5 | Carbon module — `carbon_service` + `POST /api/calculate-impact` | Pending |
+| 3 | YOLO training — transfer learning, augmentation, GTX-1650 settings | **DONE** |
+| 4 | Evaluation + export + `detection_service` + `POST /api/predict` | **DONE** |
+| 5 | Carbon module — `carbon_service` + `POST /api/calculate-impact` | **Next** |
 | 6 | Recommendation module — rule-based + optional LLM enrichment | Pending |
 | 7 | Frontend — drag-drop, bounding-box canvas, weight forms, results dashboard | Pending |
 | 8 | Full test suite, gunicorn deployment guide, FYP documentation | Pending |
@@ -358,9 +379,11 @@ Each completed step gets its own commit + push — see §15 for the commit conve
 - **Never** make tests depend on the network or a GPU — mock external APIs.
 - **Never** reorder the class list — `0:BIODEGRADABLE` … `5:PLASTIC` is locked to the dataset (§6).
 - The app must run end-to-end **without** an LLM key (rule-based fallback).
-- Respect the 4 GB VRAM limit: prefer the `n` (nano) model, modest batch sizes, mixed precision; reduce batch before image size on OOM.
+- Respect the 4 GB VRAM limit: prefer the `n` (nano) model, modest batch sizes; reduce batch before image size on OOM.
+- **GTX 16-series (1650/1660) + AMP = NaN losses.** Train in FP32 (`amp=False`, the default in `train.py`). Symptom: all losses (`box`/`cls`/`dfl`) go `nan` from epoch 1 while warmup LR is still tiny, collapsing mAP to noise. FP32 does NOT blow the 4 GB budget here (batch=8 peaks ~2.8 GB). Use `--amp` only on a newer GPU with working FP16.
 - Keep carbon estimation free of any trained model — it's API-only by design.
 - Dataset folder name contains a space (`"GARBAGE CLASSIFICATION"`) — always quote the path.
+- Ultralytics resolves a **relative** `path:` in `data.yaml` against its global `datasets_dir` setting, NOT the yaml's location. `train.py` compensates by rewriting the dataset root to an absolute path at runtime (`resolve_data_config`, emits a temp `*.resolved.yaml`). Keep `ml/configs/data.yaml` portable (relative `path: ../data/GARBAGE CLASSIFICATION`) — do **not** hardcode an absolute path into the committed yaml.
 - When adding a dependency, pin its version in `requirements.txt`.
 
 ---

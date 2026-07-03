@@ -73,6 +73,8 @@ ml/notebooks/.ipynb_checkpoints/
 *.onnx
 *.engine
 *.weights
+*.whl
+wheels/
 *.h5
 *.pb
 *.tflite
