@@ -14,8 +14,17 @@ from app.schemas.detection import PredictResponse
 
 _FAKE_DETECTION = {
     "items": [
-        {"id": 0, "class_name": "PLASTIC", "display_name": "Plastic",
-         "confidence": 0.87, "bbox": [10, 20, 110, 120]},
+        {"id": 0, "class_name": "plastic", "display_name": "Plastic",
+         "confidence": 0.87, "box_confidence": 0.41, "located_as": "Plastic",
+         "bbox": [10, 20, 110, 120],
+         "polygon": [[10, 20], [110, 20], [110, 120], [10, 120]],
+         "mask_area_px": 10000.0,
+         "material_scores": [{"label": "plastic", "score": 0.87},
+                             {"label": "glass", "score": 0.13}],
+         "physics": {"laplacian_variance": 812.4, "edge_density": 0.13,
+                     "plasticity_index": 0.94, "tiebreak_applied": False},
+         "carbon_factor_kg_per_kg": 3.10,
+         "estimated_carbon_kg": 6.2},
     ],
     "image": {"width": 32, "height": 32},
 }
@@ -33,7 +42,7 @@ def test_predict_ok(client, tmp_path):
     # Route uploads into a temp dir so the test leaves no artefacts behind.
     client.application.config["UPLOAD_FOLDER"] = str(tmp_path)
 
-    with patch("app.blueprints.api.routes.run_detection", return_value=_FAKE_DETECTION):
+    with patch("app.blueprints.api.routes.analyze_waste_pipeline", return_value=_FAKE_DETECTION):
         res = client.post(
             "/api/predict",
             data={"image": (_png_upload(), "test.png")},

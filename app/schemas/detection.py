@@ -1,23 +1,48 @@
 """
-Pydantic schemas for the detection API.
+Pydantic schemas for the detection API (Dual-Tower Hybrid pipeline).
 
-These document and validate the shape returned by ``detection_service`` and the
-``POST /api/predict`` endpoint. They double as living documentation of the JSON
-contract the frontend consumes.
+These document and validate the shape returned by
+``detection_service.analyze_waste_pipeline`` and the ``POST /api/predict``
+endpoint. They double as living documentation of the JSON contract the
+frontend consumes.
 """
 from typing import List
 
 from pydantic import BaseModel, Field
 
 
+class MaterialScore(BaseModel):
+    """One entry of the Stage-2 ViT softmax distribution for an item."""
+
+    label: str                            # material class, e.g. "plastic"
+    score: float = Field(ge=0.0, le=1.0)
+
+
+class PhysicsInfo(BaseModel):
+    """Method B evidence: classical-CV cues + the Plasticity Index psi."""
+
+    laplacian_variance: float = Field(ge=0.0)   # micro-wrinkle texture variance
+    edge_density: float = Field(ge=0.0, le=1.0)  # fraction of Canny edge pixels
+    plasticity_index: float = Field(ge=0.0, le=1.0)  # psi: >=0.5 plastic-like
+    tiebreak_applied: bool                # True when psi corrected the ViT ranking
+
+
 class DetectionItem(BaseModel):
-    """A single detected waste item."""
+    """A single detected waste item (Stage-1 instance + Stage-2 material)."""
 
     id: int
-    class_name: str                       # LOCKED internal name, e.g. "PLASTIC"
+    class_name: str                       # winning material, e.g. "plastic"
     display_name: str                     # friendly UI label, e.g. "Plastic"
-    confidence: float = Field(ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)        # Stage-2 ViT softmax score
+    box_confidence: float = Field(ge=0.0, le=1.0)    # Stage-1 localization score
+    located_as: str                       # raw COCO label from Stage 1 (diagnostic only)
     bbox: List[int] = Field(min_length=4, max_length=4)  # [x1, y1, x2, y2] pixels
+    polygon: List[List[int]] = Field(min_length=3)  # instance-mask vertices [[x, y], ...]
+    mask_area_px: float = Field(ge=0.0)   # shoelace-enclosed pixel area of the mask
+    material_scores: List[MaterialScore]  # ViT distribution (post tie-break), sorted desc
+    physics: PhysicsInfo                  # Method B cues + tie-break audit flag
+    carbon_factor_kg_per_kg: float = Field(ge=0.0)  # base material coefficient
+    estimated_carbon_kg: float = Field(ge=0.0)      # base x (mask_area_px / gamma)
 
 
 class ImageInfo(BaseModel):
@@ -28,7 +53,7 @@ class ImageInfo(BaseModel):
 
 
 class DetectionResult(BaseModel):
-    """What ``detection_service.run_detection`` returns."""
+    """What ``detection_service.analyze_waste_pipeline`` returns."""
 
     items: List[DetectionItem]
     image: ImageInfo

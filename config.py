@@ -27,17 +27,33 @@ class BaseConfig:
     MAX_CONTENT_LENGTH = 10 * 1024 * 1024  # 10 MB max upload
     ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
 
-    # --- Model / inference ---
-    MODEL_PATH = os.getenv("MODEL_PATH", os.path.join(BASE_DIR, "models", "best.pt"))
-    CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", 0.35))
-    # Device used for inference at serving time. "cpu" is the safe default for a
-    # web server (no CUDA needed, no contention); set to "0" to use GPU 0.
+    # --- Model / inference (Dual-Tower Hybrid: waste YOLO-seg + TrashNet ViT) ---
+    # Stage 1 locator: a SPECIALIZED waste instance-segmentation model
+    # (YOLOv8-M-seg fine-tuned on TACO wild litter + TrashNet household
+    # recyclables; HF turhancan97/yolov8-segment-trash-detection). Its latent
+    # space only knows waste, so background objects are inherently ignored.
+    # The file auto-downloads from the HF Hub on first load if missing. Its 5
+    # coarse labels are diagnostics only (located_as) — the ViT decides
+    # material. Per-instance polygon masks drive the dynamic carbon scaling.
+    # For A/B baselines, a bare official Ultralytics name ("yolo26x-seg.pt")
+    # still works here.
+    MODEL_PATH = os.getenv("MODEL_PATH", os.path.join("models", "yolov8m-seg-trash.pt"))
+    # Stage 2 material classifier: supervised ViT fine-tuned on TrashNet-enhanced
+    # (Hugging Face model id; native labels map onto the 7-class taxonomy in
+    # classification_service.py).
+    VIT_MODEL_NAME = os.getenv("VIT_MODEL_NAME",
+                               "edwinpalegre/ee8225-group4-vit-trashnet-enhanced")
+    # Stage 1 is recall-first: a LOW threshold captures crushed/deformed items;
+    # per-item certainty comes from Stage 2's material scores instead.
+    CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", 0.15))
+    # Device used for BOTH stages at serving time. "cpu" is the safe default for
+    # a web server (no CUDA needed, no contention); set to "0" to use GPU 0.
     INFERENCE_DEVICE = os.getenv("INFERENCE_DEVICE", "cpu")
-    # The fixed class list the model is trained on (order matters for YOLO).
-    # ALL-CAPS to match the dataset's data.yaml and ml/configs/data.yaml exactly
-    # (LOCKED — see CLAUDE.md §6 & §7). The model uses these names internally.
+
+    # --- LEGACY (archived custom-training pipeline; see CLAUDE.md) ---
+    # Kept ONLY for the retired ml/ training scripts and their tests, which are
+    # preserved for the FYP report. The serving pipeline no longer reads these.
     CLASS_NAMES = ["BIODEGRADABLE", "CARDBOARD", "GLASS", "METAL", "PAPER", "PLASTIC"]
-    # The web UI never shows the raw ALL-CAPS name — it maps to a friendly label.
     APP_CLASS_DISPLAY_NAMES = {
         "BIODEGRADABLE": "Biodegradable",
         "CARDBOARD": "Cardboard",

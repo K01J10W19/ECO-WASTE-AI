@@ -3,10 +3,412 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Waste Detection &amp; Carbon Impact</title>
+  <title>Dual-Tower Test Brain — YOLO26-Seg + TrashNet ViT</title>
+  <style>
+    :root { --bg:#0f172a; --card:#1e293b; --muted:#94a3b8; --fg:#e2e8f0; --accent:#38bdf8; --ok:#34d399; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+    .wrap { max-width: 1000px; margin: 0 auto; padding: 24px 16px 64px; }
+    h1 { font-size: 1.4rem; margin: 8px 0 2px; }
+    .sub { color: var(--muted); margin: 0 0 20px; font-size: .9rem; }
+
+    /* Upload zone */
+    #drop {
+      border: 2px dashed #334155; border-radius: 12px; padding: 32px 20px; text-align:center;
+      cursor: pointer; transition: border-color .15s, background .15s; background: var(--card);
+    }
+    #drop.hover { border-color: var(--accent); background:#243149; }
+    #drop p { margin: 6px 0; color: var(--muted); }
+    #drop strong { color: var(--fg); }
+
+    /* Controls */
+    .controls { margin: 16px 0; display:flex; flex-wrap:wrap; align-items:center; gap:14px; }
+    #analyze {
+      background: var(--accent); color:#0b1220; border:0; border-radius:10px;
+      font: 700 .95rem system-ui, sans-serif; padding: 10px 22px; cursor:pointer;
+      transition: opacity .15s, transform .05s;
+    }
+    #analyze:disabled { opacity:.35; cursor:not-allowed; }
+    #analyze:not(:disabled):active { transform: scale(.97); }
+    .conf-box { flex:1; min-width: 220px; display:flex; flex-direction:column; gap:4px; }
+    .conf-box input[type=range] { width:100%; accent-color: var(--accent); }
+    .hint { color:#64748b; font-size:.78rem; }
+
+    #status { margin: 4px 0 12px; min-height: 1.2em; font-size:.92rem; }
+    #status.error { color:#f87171; }
+
+    /* Canvas + inspector layout */
+    .layout { display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap; }
+    .canvas-col { flex: 1 1 480px; min-width: 300px; }
+    canvas, #preview { display:block; max-width:100%; height:auto; border-radius:10px; background:#000; }
+    canvas { cursor: default; }
+
+    /* Inspector panel (Stage-2 evidence + carbon math for the hovered/clicked item) */
+    #inspector {
+      flex: 0 1 300px; min-width: 260px; background: var(--card);
+      border: 1px solid #24324a; border-radius: 12px; padding: 14px 16px; display:none;
+    }
+    #inspector h3 { margin: 0 0 2px; font-size: 1.02rem; display:flex; align-items:center; gap:8px; }
+    #inspector .meta { color: var(--muted); font-size:.8rem; margin-bottom: 10px; }
+    .bar-row { display:flex; align-items:center; gap:8px; margin: 5px 0; font-size:.8rem; }
+    .bar-label { flex: 0 0 108px; color: var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .bar-track { flex:1; height: 10px; background:#0b1220; border-radius:5px; overflow:hidden; }
+    .bar-fill { height:100%; border-radius:5px; }
+    .bar-pct { flex: 0 0 44px; text-align:right; color: var(--fg); font-variant-numeric: tabular-nums; }
+    .carbon-line {
+      margin-top: 12px; padding-top: 10px; border-top: 1px solid #24324a;
+      color: var(--ok); font-size: .88rem;
+    }
+    .carbon-line small { display:block; color:#64748b; margin-top:2px; }
+    .inspector-empty { color:#64748b; font-size:.85rem; }
+
+    /* Item list */
+    ul#items { list-style:none; padding:0; margin:16px 0 0; }
+    ul#items li {
+      display:flex; align-items:center; gap:8px; padding:7px 8px; border-bottom:1px solid #24324a;
+      flex-wrap:wrap; cursor:pointer; border-radius:8px; transition: background .1s;
+    }
+    ul#items li:hover, ul#items li.active { background:#243149; }
+    .dot { width:12px; height:12px; border-radius:3px; display:inline-block; flex:0 0 auto; }
+    .boxconf { color:#64748b; font-size:.78rem; }
+    .carbon { color:var(--ok); font-size:.85rem; margin-left:auto; }
+
+    /* Raw JSON panel */
+    h2 { font-size:1rem; margin:28px 0 8px; color:var(--muted); }
+    pre#json {
+      background:#0b1220; border:1px solid #24324a; border-radius:10px; padding:14px;
+      font: .8rem/1.5 ui-monospace, Consolas, monospace; color:#a5f3fc;
+      overflow-x:auto; white-space:pre; max-height: 420px; overflow-y:auto; display:none;
+    }
+    .note { margin-top:40px; color:#64748b; font-size:.8rem; border-top:1px solid #24324a; padding-top:12px; }
+    code { background:#0b1220; padding:1px 5px; border-radius:4px; }
+  </style>
 </head>
 <body>
-  <h1>Waste Detection &amp; Carbon Impact</h1>
-  <p>Scaffold is running. The full UI is built in Step 7.</p>
+  <div class="wrap">
+    <h1>🧠 Dual-Tower Test Brain</h1>
+    <p class="sub"><strong>Stage 1</strong> a specialized waste segmenter (TACO + TrashNet blend) masks ONLY
+      trash-like objects — background furniture/floors never fire →
+      square padding + <strong>Method B</strong> physics (Laplacian wrinkles + Canny edges → ψ) →
+      <strong>Stage 2</strong> TrashNet ViT names the material; ψ breaks ambiguous plastic-vs-glass calls.
+      Mask pixel area scales each carbon estimate. Hover or click a mask to inspect.</p>
+
+    <!-- 1) Upload zone: click or drag & drop -->
+    <div id="drop">
+      <p><strong>Click to choose an image</strong> or drag &amp; drop it here</p>
+      <p>PNG / JPG / WEBP · max 10 MB</p>
+      <input id="file" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+    </div>
+
+    <!-- 2) Analyze trigger + Stage-1 recall tuning -->
+    <div class="controls">
+      <button id="analyze" disabled>🧠 Analyze</button>
+      <div class="conf-box">
+        <label for="conf">Stage-1 threshold: <strong id="confVal">0.15</strong></label>
+        <input id="conf" type="range" min="0.05" max="0.90" step="0.05" value="0.15" />
+        <span class="hint">Kept LOW on purpose — the segmenter should over-find; the ViT's material scores carry the certainty. YOLO26 is end-to-end NMS-free: confidence is the only knob.</span>
+      </div>
+    </div>
+
+    <div id="status"></div>
+
+    <!-- 3) Annotated canvas (polygon masks) + hover/click inspector -->
+    <div class="layout">
+      <div class="canvas-col" id="shell" style="display:none">
+        <img id="preview" alt="preview" />
+        <canvas id="canvas" style="display:none"></canvas>
+      </div>
+      <div id="inspector"></div>
+    </div>
+
+    <ul id="items"></ul>
+
+    <!-- 4) Raw JSON returned by the backend -->
+    <h2>Raw API response</h2>
+    <pre id="json"></pre>
+
+    <p class="note">Powered by <code>POST /api/predict</code> →
+      waste segmenter (<code>models/yolov8m-seg-trash.pt</code>, TACO+TrashNet blend)
+      + Method B physics (ψ tie-breaker)
+      + TrashNet ViT (<code>edwinpalegre/ee8225-group4-vit-trashnet-enhanced</code>, 224×224 patches) ·
+      carbon = base coefficient × (mask px² ÷ 5000) · first request downloads both models.</p>
+  </div>
+
+  <script>
+    // Colors keyed to the 7-class material taxonomy
+    // (classification_service.MATERIAL_CLASSES). Unknown labels fall back to pink.
+    const MATERIAL_COLORS = {
+      "biodegradable":   "#22c55e",
+      "cardboard":       "#f59e0b",
+      "glass":           "#06b6d4",
+      "metal":           "#818cf8",
+      "paper":           "#eab308",
+      "plastic":         "#ef4444",
+      "general rubbish": "#94a3b8",
+    };
+    const FALLBACK_COLOR = "#f43f5e";
+    const colorOf = (label) => MATERIAL_COLORS[label] || FALLBACK_COLOR;
+    // hex "#rrggbb" -> "rgba(r,g,b,a)" for the semi-transparent mask fills.
+    function rgba(hex, a) {
+      const n = parseInt(hex.slice(1), 16);
+      return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+    }
+
+    const drop       = document.getElementById("drop");
+    const fileInput  = document.getElementById("file");
+    const analyzeBtn = document.getElementById("analyze");
+    const statusEl   = document.getElementById("status");
+    const shell      = document.getElementById("shell");
+    const preview    = document.getElementById("preview");
+    const canvas     = document.getElementById("canvas");
+    const ctx        = canvas.getContext("2d");
+    const inspector  = document.getElementById("inspector");
+    const itemsEl    = document.getElementById("items");
+    const jsonEl     = document.getElementById("json");
+    const confSlider = document.getElementById("conf");
+    const confVal    = document.getElementById("confVal");
+
+    let selectedFile = null;
+    let state = null;        // { items, image, img, scale } after a successful analyze
+    let itemPaths = [];      // Path2D per item at current canvas scale (for hit-testing)
+    let hoveredId = null;    // mask under the cursor
+    let selectedId = null;   // mask pinned by click
+
+    confSlider.addEventListener("input", () => { confVal.textContent = confSlider.value; });
+
+    // --- Upload zone wiring (click + drag & drop) ---
+    drop.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", (e) => selectFile(e.target.files[0]));
+    ["dragover", "dragenter"].forEach(ev =>
+      drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("hover"); }));
+    ["dragleave", "drop"].forEach(ev =>
+      drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("hover"); }));
+    drop.addEventListener("drop", (e) => selectFile(e.dataTransfer.files[0]));
+
+    function setStatus(msg, isError = false) {
+      statusEl.textContent = msg;
+      statusEl.classList.toggle("error", isError);
+    }
+
+    // Instant local preview; the pipeline only runs on button press.
+    function selectFile(file) {
+      if (!file) return;
+      selectedFile = file;
+      state = null; itemPaths = []; hoveredId = null; selectedId = null;
+      preview.src = URL.createObjectURL(file);
+      preview.style.display = "block";
+      canvas.style.display = "none";
+      shell.style.display = "block";
+      inspector.style.display = "none";
+      itemsEl.innerHTML = "";
+      jsonEl.style.display = "none";
+      analyzeBtn.disabled = false;
+      setStatus(`Ready: ${file.name} (${(file.size / 1024).toFixed(0)} KB) — press Analyze.`);
+    }
+
+    // --- Send the image through the dual-tower pipeline ---
+    analyzeBtn.addEventListener("click", async () => {
+      if (!selectedFile) return;
+      analyzeBtn.disabled = true;
+      setStatus("Analyzing… Stage 1 segments, Stage 2 classifies each padded patch (first request loads both models).");
+
+      const form = new FormData();
+      form.append("image", selectedFile);
+      form.append("conf", confSlider.value);
+      try {
+        const res = await fetch("/api/predict", { method: "POST", body: form });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        render(data);
+      } catch (err) {
+        setStatus("Error: " + err.message, true);
+      } finally {
+        analyzeBtn.disabled = false;
+      }
+    });
+
+    // --- Rendering ---------------------------------------------------------
+    function render(data) {
+      jsonEl.textContent = JSON.stringify(data, null, 2);
+      jsonEl.style.display = "block";
+
+      const img = new Image();
+      img.onload = () => {
+        const colWidth = canvas.parentElement.clientWidth || 640;
+        const scale = Math.min(1, colWidth / data.image.width);
+        canvas.width = data.image.width * scale;
+        canvas.height = data.image.height * scale;
+        state = { items: data.items, image: data.image, img, scale };
+        hoveredId = null; selectedId = null;
+
+        preview.style.display = "none";
+        canvas.style.display = "block";
+        setStatus(`${data.items.length} item(s) · ${data.image.width}×${data.image.height}px — hover/click a mask for the ViT breakdown.`);
+        renderList();
+
+        // Show the breakdown immediately: auto-pin the most confident item
+        // (hover/click still lets the user walk through the rest).
+        if (data.items.length) {
+          selectedId = data.items.reduce((a, b) => (b.confidence > a.confidence ? b : a)).id;
+        }
+        drawMasks();
+        renderInspector(selectedId);
+        highlightListRow();
+      };
+      img.onerror = () => setStatus("Could not load the uploaded image for preview.", true);
+      img.src = data.image.url;   // server-saved copy, so masks align with what the model saw
+    }
+
+    // Build a Path2D from an item's polygon vertices at the current scale.
+    function pathFor(item, scale) {
+      const path = new Path2D();
+      const poly = item.polygon;
+      if (!poly || poly.length < 3) return path;
+      path.moveTo(poly[0][0] * scale, poly[0][1] * scale);
+      for (let i = 1; i < poly.length; i++) path.lineTo(poly[i][0] * scale, poly[i][1] * scale);
+      path.closePath();
+      return path;
+    }
+
+    function drawMasks() {
+      if (!state) return;
+      const { items, img, scale } = state;
+      const activeId = (hoveredId !== null) ? hoveredId : selectedId;
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+      itemPaths = items.map((it) => pathFor(it, scale));
+      items.forEach((it) => {
+        const color = colorOf(it.class_name);
+        const active = it.id === activeId;
+        const path = itemPaths[it.id];
+
+        // Professional semi-transparent mask fill + crisp outline.
+        ctx.fillStyle = rgba(color, active ? 0.45 : 0.30);
+        ctx.fill(path);
+        ctx.lineWidth = active ? 3.5 : 2;
+        ctx.strokeStyle = color;
+        ctx.stroke(path);
+
+        // Label chip anchored at the top of the item's bbox.
+        const [x1, y1] = [it.bbox[0] * scale, it.bbox[1] * scale];
+        const label = `${it.display_name} ${(it.confidence * 100).toFixed(0)}%`;
+        ctx.font = "600 14px system-ui, sans-serif";
+        const w = ctx.measureText(label).width + 10;
+        ctx.fillStyle = color;
+        ctx.fillRect(x1 - 1, Math.max(0, y1 - 20), w, 20);
+        ctx.fillStyle = "#0b1220";
+        ctx.fillText(label, x1 + 4, Math.max(14, y1 - 6));
+      });
+    }
+
+    // Point-in-polygon hit test via Path2D; overlapping masks -> smallest area wins.
+    function hitTest(mx, my) {
+      if (!state) return null;
+      let best = null, bestArea = Infinity;
+      state.items.forEach((it) => {
+        if (ctx.isPointInPath(itemPaths[it.id], mx, my) && it.mask_area_px < bestArea) {
+          bestArea = it.mask_area_px;
+          best = it.id;
+        }
+      });
+      return best;
+    }
+
+    canvas.addEventListener("mousemove", (e) => {
+      const r = canvas.getBoundingClientRect();
+      const id = hitTest(e.clientX - r.left, e.clientY - r.top);
+      canvas.style.cursor = (id !== null) ? "pointer" : "default";
+      if (id !== hoveredId) {
+        hoveredId = id;
+        drawMasks();
+        renderInspector(hoveredId !== null ? hoveredId : selectedId);
+        highlightListRow();
+      }
+    });
+    canvas.addEventListener("mouseleave", () => {
+      hoveredId = null;
+      drawMasks();
+      renderInspector(selectedId);
+      highlightListRow();
+    });
+    canvas.addEventListener("click", (e) => {
+      const r = canvas.getBoundingClientRect();
+      const id = hitTest(e.clientX - r.left, e.clientY - r.top);
+      selectedId = (id === selectedId) ? null : id;   // click again to unpin
+      drawMasks();
+      renderInspector(selectedId !== null ? selectedId : hoveredId);
+      highlightListRow();
+    });
+
+    // --- Inspector: ViT evidence + dynamic carbon math for one item --------
+    function renderInspector(id) {
+      inspector.style.display = "block";
+      if (!state || id === null || !state.items[id]) {
+        inspector.innerHTML = `<span class="inspector-empty">Hover or click a segmentation mask
+          (or a row below) to inspect the ViT material analysis and the pixel-area
+          carbon estimate for that object.</span>`;
+        return;
+      }
+      const it = state.items[id];
+      const bars = it.material_scores.map((s) => `
+        <div class="bar-row">
+          <span class="bar-label">${s.label}</span>
+          <span class="bar-track"><span class="bar-fill"
+            style="width:${(s.score * 100).toFixed(1)}%; background:${colorOf(s.label)}"></span></span>
+          <span class="bar-pct">${(s.score * 100).toFixed(1)}%</span>
+        </div>`).join("");
+
+      inspector.innerHTML = `
+        <h3><span class="dot" style="background:${colorOf(it.class_name)}"></span>
+            Item ${it.id + 1}: ${it.display_name}</h3>
+        <div class="meta">Stage 1 segmented this as &ldquo;${it.located_as}&rdquo;
+          (${(it.box_confidence * 100).toFixed(1)}%) — label discarded
+          · ViT material confidence ${(it.confidence * 100).toFixed(1)}%
+          · mask ${Math.round(it.mask_area_px).toLocaleString()} px²<br>
+          Method B: ψ ${it.physics.plasticity_index.toFixed(2)}
+          (wrinkle var ${Math.round(it.physics.laplacian_variance)},
+          edges ${(it.physics.edge_density * 100).toFixed(1)}%)
+          ${it.physics.tiebreak_applied
+            ? ' · <strong style="color:#f59e0b">physics tie-break corrected the ViT ranking</strong>'
+            : ' · no tie-break needed'}</div>
+        ${bars}
+        <div class="carbon-line">≈ ${it.estimated_carbon_kg} kg CO₂e
+          <small>= ${it.carbon_factor_kg_per_kg} (base ${it.display_name.toLowerCase()} coefficient)
+            × (${Math.round(it.mask_area_px).toLocaleString()} px² ÷ 5000 γ)
+            — placeholder coefficients; live Climatiq + real weights land in Step 5</small>
+        </div>`;
+    }
+
+    // --- Item list (rows mirror canvas hover/click) -------------------------
+    function renderList() {
+      if (!state.items.length) {
+        itemsEl.innerHTML = `<li style="cursor:default">No objects segmented — try lowering the Stage-1 threshold.</li>`;
+        return;
+      }
+      itemsEl.innerHTML = state.items.map((it) => `
+        <li data-id="${it.id}">
+          <span class="dot" style="background:${colorOf(it.class_name)}"></span>
+          ${it.display_name} — <strong>${(it.confidence * 100).toFixed(1)}%</strong>
+          <span class="boxconf">seg: ${it.located_as} ${(it.box_confidence * 100).toFixed(0)}% · ${Math.round(it.mask_area_px).toLocaleString()} px²</span>
+          <span class="carbon">≈ ${it.estimated_carbon_kg} kg CO₂e</span>
+        </li>`).join("");
+
+      itemsEl.querySelectorAll("li[data-id]").forEach((li) => {
+        const id = Number(li.dataset.id);
+        li.addEventListener("mouseenter", () => { hoveredId = id; drawMasks(); renderInspector(id); highlightListRow(); });
+        li.addEventListener("mouseleave", () => { hoveredId = null; drawMasks(); renderInspector(selectedId); highlightListRow(); });
+        li.addEventListener("click", () => {
+          selectedId = (selectedId === id) ? null : id;
+          drawMasks(); renderInspector(selectedId !== null ? selectedId : id); highlightListRow();
+        });
+      });
+    }
+
+    function highlightListRow() {
+      const activeId = (hoveredId !== null) ? hoveredId : selectedId;
+      itemsEl.querySelectorAll("li[data-id]").forEach((li) =>
+        li.classList.toggle("active", Number(li.dataset.id) === activeId));
+    }
+  </script>
 </body>
 </html>
