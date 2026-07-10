@@ -35,14 +35,13 @@ class DetectionItem(BaseModel):
     display_name: str                     # friendly UI label, e.g. "Plastic"
     confidence: float = Field(ge=0.0, le=1.0)        # Stage-2 ViT softmax score
     box_confidence: float = Field(ge=0.0, le=1.0)    # Stage-1 localization score
-    located_as: str                       # raw COCO label from Stage 1 (diagnostic only)
+    located_as: str                       # Stage-1 detector's own label (diagnostic only)
     bbox: List[int] = Field(min_length=4, max_length=4)  # [x1, y1, x2, y2] pixels
-    polygon: List[List[int]] = Field(min_length=3)  # instance-mask vertices [[x, y], ...]
-    mask_area_px: float = Field(ge=0.0)   # shoelace-enclosed pixel area of the mask
+    box_area_px: float = Field(ge=0.0)    # (x2-x1)*(y2-y1) — volume/mass proxy
     material_scores: List[MaterialScore]  # ViT distribution (post tie-break), sorted desc
     physics: PhysicsInfo                  # Method B cues + tie-break audit flag
     carbon_factor_kg_per_kg: float = Field(ge=0.0)  # base material coefficient
-    estimated_carbon_kg: float = Field(ge=0.0)      # base x (mask_area_px / gamma)
+    estimated_carbon_kg: float = Field(ge=0.0)      # base x (box_area_px / gamma)
 
 
 class ImageInfo(BaseModel):

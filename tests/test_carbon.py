@@ -32,10 +32,11 @@ def test_estimate_impact_rejects_negative_weight():
         cs.estimate_impact("cardboard", -1.0)
 
 
-def test_dynamic_impact_scales_with_mask_area():
-    # base x (area / gamma): a mask of exactly gamma pixels scores 1x its base.
+def test_dynamic_impact_scales_with_box_area():
+    # base x (area / gamma): a box of exactly gamma pixels scores 1x its base.
+    assert cs.PIXEL_AREA_GAMMA == 8000.0   # recalibrated for rectangular over-coverage
     assert cs.estimate_dynamic_impact("plastic", cs.PIXEL_AREA_GAMMA) == 3.10
-    assert cs.estimate_dynamic_impact("plastic", 10000.0) == pytest.approx(6.2)
+    assert cs.estimate_dynamic_impact("plastic", 16000.0) == pytest.approx(6.2)
     assert cs.estimate_dynamic_impact("glass", 0.0) == 0.0
 
 

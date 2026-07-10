@@ -13,37 +13,38 @@
 
 **Type:** Final Year Project (FYP). Code must be production-ready, modular, well-documented, and easy for an academic examiner to audit.
 
-**One-line description:** A web app where a user uploads a real-world image containing one or more waste items; a **100% local Dual-Tower Hybrid pipeline** — a **specialized waste segmenter** (YOLOv8-M-seg fine-tuned on TACO wild litter + TrashNet household recyclables) masks ONLY trash-like objects, a context-aware square-padding layer normalizes each crop, a **classical-CV physics extractor** (Method B: Laplacian wrinkles + Canny edges → Plasticity Index ψ) profiles each patch, and a TrashNet-fine-tuned Vision Transformer names the material (7-class taxonomy, with ψ breaking ambiguous plastic-vs-glass calls) — identifies every item; each item's carbon footprint is **dynamically scaled by its mask's pixel area** (placeholder coefficients now, real-time Climatiq API with user-entered weights in Step 5); and it returns tailored recycling/disposal recommendations per item.
+**One-line description:** A web app where a user uploads a real-world image containing one or more waste items; a **100% local Dual-Tower Hybrid pipeline** — a **specialized waste object detector** (YOLOv8-N fine-tuned on a blended universal waste corpus of wild litter + household recyclables) boxes ONLY trash-like objects, a context-aware square-padding layer normalizes each crop, a **classical-CV physics extractor** (Method B: Laplacian wrinkles + Canny edges → Plasticity Index ψ) profiles each patch, and a TrashNet-fine-tuned Vision Transformer names the material (7-class taxonomy, with ψ breaking ambiguous plastic-vs-glass calls) — identifies every item; each item's carbon footprint is **dynamically scaled by its bounding box's geometric pixel area** (placeholder coefficients now, real-time Climatiq API with user-entered weights in Step 5); and it returns tailored recycling/disposal recommendations per item.
 
 **Author's environment:** Windows 11, PowerShell, local GPU = **NVIDIA GTX 1650 (4 GB VRAM)**. All ML choices must respect this 4 GB limit (inference of both towers fits; only *training* ever exceeded it, and training is retired).
 
 ---
 
-## 2. ARCHITECTURE: The Dual-Tower Hybrid (Waste YOLO-Seg + Method B + TrashNet ViT) — read this first
+## 2. ARCHITECTURE: The Dual-Tower Hybrid (Waste YOLO Detector + Method B + TrashNet ViT) — read this first
 
 The project went through several pivots (custom training → single-stage YOLO-World →
 two-stage with abstract anchors → two-stage vanilla YOLOv8 → two-stage RT-DETR-X →
-COCO-80 YOLO26-seg → **this, v3.1**). The paradigm is **edge-native and 100% local**:
-two frozen local models plus a classical-CV layer, no cloud inference. Localization
-and classification are **decoupled**, and each tower plays its architectural
-strength — **CNN local spatial acuity for WHERE, ViT global self-attention for WHAT,
-classical physics for the ties**:
+COCO-80 YOLO26-seg → blended-waste segmenter → **this, v3.2**). The paradigm is
+**edge-native and 100% local**: two frozen local models plus a classical-CV layer,
+no cloud inference. Localization and classification are **decoupled**, and each tower
+plays its architectural strength — **CNN spatial localization for WHERE, ViT global
+self-attention for WHAT, classical physics for the ties**:
 
 ```
-Stage 1 — LOCALIZATION (waste segmentation)      Stage 2 — CLASSIFICATION (material)
-SPECIALIZED waste segmenter (YOLOv8-M-seg        TrashNet ViT (supervised ViT-B/16)
-fine-tuned: TACO wild litter + TrashNet          edwinpalegre/ee8225-group4-
-household recyclables; HF turhancan97/            vit-trashnet-enhanced (98.2% val acc)
-yolov8-segment-trash-detection, MIT)             native labels (verified id2label):
-models/yolov8m-seg-trash.pt (~55 MB)       ──►   biodegradable cardboard glass metal
-latent space ONLY knows waste — background 224²   paper plastic trash→"general rubbish"
-furniture/floors/plants never fire         patch  judges texture/gloss/material
-5 coarse labels (Glass/Metal/Paper/                       │
-Plastic/Waste) noted as `located_as`,                     ▼
-NEVER trusted for identity                        ψ TIE-BREAK: ambiguous plastic-vs-
-conf=0.15 (recall-first, conf-only call)          glass calls corrected by physics
+Stage 1 — LOCALIZATION (waste detection)         Stage 2 — CLASSIFICATION (material)
+SPECIALIZED waste OBJECT DETECTOR                TrashNet ViT (supervised ViT-B/16)
+(YOLOv8-N fine-tuned on a blended                edwinpalegre/ee8225-group4-
+universal waste corpus: wild litter +             vit-trashnet-enhanced (98.2% val acc)
+household recyclables; GitHub gianluca-          native labels (verified id2label):
+sposito/YOLO-Waste-Detection, MIT)         ──►   biodegradable cardboard glass metal
+models/yolov8n-waste-det.pt (~6 MB)        224²   paper plastic trash→"general rubbish"
+latent space ONLY knows waste — background patch  judges texture/gloss/material
+rarely fires; nano backbone = max fps                     │
+5 coarse labels (Glass/Metal/Paper/                       ▼
+Plastic/Waste) noted as `located_as`,             ψ TIE-BREAK: ambiguous plastic-vs-
+NEVER trusted for identity                        glass calls corrected by physics
+conf=0.15 (recall-first, conf-only call)
          │
-         └── Processing layer:
+         └── Processing layer (anchored directly on box.xyxy):
              (a) CONTEXT-AWARE SQUARE PADDING:
                  box → +15% context margin → square pad (neutral gray, NO stretch) → 224x224
              (b) METHOD B — CLASSICAL CV PHYSICS EXTRACTOR (OpenCV):
@@ -52,18 +53,27 @@ conf=0.15 (recall-first, conf-only call)          glass calls corrected by physi
 ```
 
 **Engineering justification:**
-- **Why a specialist waste segmenter for Stage 1 (the v3.1 reasoning).** The COCO-80
-  predecessor boxed *everything* COCO-shaped — tables, people, buses — and the ViT
+- **Why a specialist waste detector for Stage 1 (the v3.2 reasoning).** The COCO-80
+  generation boxed *everything* COCO-shaped — tables, people, buses — and the ViT
   (which has no "not waste" class) force-classified that background noise into
-  materials. The blended-corpus segmenter's latent space has no concept of
-  furniture/floors/plants, so environmental noise is filtered *architecturally*, and
-  its generic "Waste" class catches amorphous litter that had no COCO look-alike
-  (the previous documented gap). Verified live: 5 labels, genuine fine-tune, MIT.
-- **Why masks, not just boxes (the academic core feature).** A box's area includes
-  background; a segmentation mask's enclosed **pixel area** tracks the object itself,
-  making it a usable proxy for physical volume/mass. Each item's carbon estimate is
-  dynamically scaled by it (see formula below) — bigger litter, bigger footprint —
-  until Step 5 replaces the proxy with user-entered weights.
+  materials. A blended-corpus waste model filters environmental noise
+  *architecturally*, and its generic "Waste" class catches amorphous litter with no
+  COCO look-alike. Choosing plain **object detection** over instance segmentation
+  then buys three things on edge hardware: (1) no per-instance mask decoding —
+  markedly higher frame-rate throughput on the nano backbone (~6 MB vs ~55 MB);
+  (2) no mask-suppression artifacts in high-density waste layouts, where
+  overlapping mask NMS can silently merge or drop tightly packed instances —
+  rectangles keep every instance distinct; (3) a simpler, fully deterministic
+  geometric weight modifier for the carbon formula. Verified live: 5 labels,
+  genuine fine-tune, MIT.
+- **Why box area as the volume/mass proxy (the academic core feature, adapted).**
+  With `result.masks` natively `None`, the geometric box area
+  `(x2-x1)*(y2-y1)` becomes the physical volume/mass proxy. A rectangle
+  over-covers a tight object contour by ~1.6x (measured mask/box fill factor
+  ~0.6 on live waste samples), so the calibration constant γ is scaled
+  accordingly (5000 → **8000**) to keep carbon magnitudes comparable across
+  locator generations — bigger litter, bigger footprint — until Step 5 replaces
+  the proxy with user-entered weights.
 - **Why a supervised ViT for Stage 2.** Material recognition on an isolated patch is a
   *global* problem — gloss, texture and colour distributed across the whole crop, not
   localized parts — which suits ViT self-attention. The chosen checkpoint is
@@ -91,10 +101,12 @@ conf=0.15 (recall-first, conf-only call)          glass calls corrected by physi
   a spurious mask gets a low, flat ViT distribution, and per-item certainty shown to
   the user comes from Stage 2, not Stage 1.
 - **Known limitation (document honestly in the report):** the specialist checkpoint
-  has no published metrics (community model, ~8k training images) — recall on
-  *pristine* everyday objects may trail the COCO baseline. Mitigation: the low
-  Stage-1 threshold, and `MODEL_PATH=yolo26x-seg.pt` keeps the COCO-80 YOLO26
-  baseline one env-var away for A/B comparison (report material). ψ's calibration
+  has no published metrics (community model, ~4.1k training images) — recall on
+  unusual items may trail bigger baselines, and a box area *includes background*
+  so it is a coarser size proxy than a mask. Mitigations: the low Stage-1
+  threshold; γ recalibrated for rectangular over-coverage; and both prior locators
+  stay one env-var away (`models/yolov8m-seg-trash.pt` masks,
+  `yolo26x-seg.pt` COCO-80) for A/B comparison (report material). ψ's calibration
   constants are heuristics — the payload carries every physics reading +
   `tiebreak_applied` so corrections are fully auditable.
 
@@ -112,15 +124,18 @@ Tie-break fires iff  top-2 = {plastic, glass}  AND  |p₁ − p₂| < 0.15:
 Constants live in `detection_service.py` (`_LAPLACIAN_REF=500`,
 `_EDGE_DENSITY_REF=0.10`, `PLASTICITY_TIEBREAK_MARGIN=0.15`).
 
-**Pixel-Area Dynamic Carbon Scaling (academic core feature):**
+**Box-Area Dynamic Carbon Scaling (academic core feature):**
 
 ```
-Final Carbon Impact (kg CO2e) = Base Material Coefficient x (Mask Pixel Area / γ)
+Box Area (px²)                = (x₂ − x₁) × (y₂ − y₁)
+Final Carbon Impact (kg CO2e) = Base Material Coefficient x (Box Area / γ)
 
-γ (PIXEL_AREA_GAMMA) = 5000.0   — reference pixel density, carbon_service.py
+γ (PIXEL_AREA_GAMMA) = 8000.0   — reference pixel density, carbon_service.py
+  (recalibrated from the mask-era 5000: rectangles over-cover tight contours
+   by ~1.6x, i.e. 5000 / 0.625 = 8000, keeping magnitudes comparable)
 ```
 
-A mask of exactly γ pixels scores 1x its base coefficient; larger masks scale up
+A box of exactly γ pixels scores 1x its base coefficient; larger boxes scale up
 proportionally. Implemented in `carbon_service.estimate_dynamic_impact(label, area)`;
 the per-item payload carries BOTH the base coefficient (`carbon_factor_kg_per_kg`)
 and the scaled result (`estimated_carbon_kg`).
@@ -131,14 +146,13 @@ and the scaled result (`estimated_carbon_kg`).
 Upload (multipart image)
   → POST /api/predict (thin controller: validate, save, delegate)
     → detection_service.analyze_waste_pipeline(image_path)
-       1. Stage 1: specialist waste segmenter (models/yolov8m-seg-trash.pt,
-          auto-fetched from the HF hub if missing), predict (conf only, 0.15)
-          → per instance: bbox via box.xyxy, box_confidence, located_as
-            (Glass/Metal/Paper/Plastic/Waste — diagnostic), polygon via
-            result.masks.xy (clamped ints; box-corner fallback if a checkpoint
-            has no masks), mask_area_px via shoelace formula
-       2. Processing layer (a): PIL — +15% context pad → square pad (114,114,114)
-          → LANCZOS resize to exactly 224x224
+       1. Stage 1: specialist waste detector (models/yolov8n-waste-det.pt,
+          auto-fetched if missing), predict (conf only, 0.15)
+          → per instance: bbox via box.xyxy (clamped), box_confidence,
+            located_as (Glass/Metal/Paper/Plastic/Waste — diagnostic),
+            box_area_px = (x2-x1)*(y2-y1)
+       2. Processing layer (a): PIL, anchored on box.xyxy — +15% context pad
+          → square pad (114,114,114) → LANCZOS resize to exactly 224x224
        3. Stage 2: classification_service.classify_crops(patches)
           → per patch: full 7-class ViT softmax (top_k=all), model's "trash"
             label mapped → "general rubbish", sorted desc
@@ -147,18 +161,19 @@ Upload (multipart image)
           _apply_plasticity_tiebreak(scores, physics) corrects an ambiguous
           plastic-vs-glass argmax (see §2 formulas)
        5. Carbon mapping: carbon_service.get_carbon_factor(material)  → base
-          coefficient; carbon_service.estimate_dynamic_impact(material, area)
-          → base x (area / γ)
+          coefficient; carbon_service.estimate_dynamic_impact(material, box_area)
+          → base x (box area / γ)
        6. Consolidated JSON:
           items[]: { id, class_name (material), display_name, confidence,
                      box_confidence (Stage 1), located_as (diagnostic),
-                     bbox, polygon[[x,y],...], mask_area_px, material_scores[7],
+                     bbox, box_area_px, material_scores[7],
                      physics{laplacian_variance, edge_density, plasticity_index,
                      tiebreak_applied}, carbon_factor_kg_per_kg, estimated_carbon_kg }
           image: { width, height (+ filename, url added by the route) }
-  → Frontend: canvas POLYGON MASK overlay (semi-transparent fills, Path2D
-    hit-testing); hover/click a mask (or list row) → inspector with the ViT
-    score bars + the ψ physics readout + the carbon formula; raw JSON panel
+  → Frontend: canvas BOUNDING-BOX overlay (ctx.strokeRect borders + light
+    interior tint, rectangular hit-testing, smallest box wins on overlap);
+    hover/click a box (or list row) → inspector with the ViT score bars +
+    the ψ physics readout + the carbon formula; raw JSON panel
 ```
 
 **Hard rules:**
@@ -184,18 +199,18 @@ Upload (multipart image)
 | Python version | **3.11.x** (NOT 3.13) | 3.13 lacks prebuilt wheels for numpy/torch on Windows; 3.11 has wheels for everything. |
 | Virtualenv (Windows) | `py -3.11 -m venv .venv` then `.\.venv\Scripts\Activate.ps1` | PowerShell does not support `&&` or `source`. Never give bash-only commands. |
 | Ultralytics version | **`ultralytics==8.4.90`** (8.3.x predates YOLO26 — never downgrade) | Loads both the specialist v8-seg weights and the YOLO26 A/B baseline. |
-| Stage 1 locator | **Specialist waste segmenter** `models/yolov8m-seg-trash.pt` (HF `turhancan97/yolov8-segment-trash-detection`, MIT; auto-fetched if missing), 5 native labels, **NO `set_classes()`** | Fine-tuned on TACO + TrashNet: only fires on waste-like objects → background noise filtered architecturally; "Waste" class catches amorphous litter. Labels discarded (kept as `located_as`). |
-| Stage 1 A/B baseline | `MODEL_PATH=yolo26x-seg.pt` (stock COCO-80, NMS-free) | One env-var away for report comparisons; the loader dispatches transparently. |
+| Stage 1 locator | **Specialist waste OBJECT DETECTOR** `models/yolov8n-waste-det.pt` (GitHub `gianlucasposito/YOLO-Waste-Detection`, MIT; auto-fetched if missing), 5 native labels, **NO `set_classes()`** | Fine-tuned on a blended universal waste corpus: only fires on waste-like objects; nano backbone = edge frame-rate; no mask-decoding overhead or mask-NMS merge artifacts in dense layouts. Labels discarded (kept as `located_as`). |
+| Stage 1 A/B alternatives | `MODEL_PATH=models/yolov8m-seg-trash.pt` (v3.1 masks) or `yolo26x-seg.pt` (COCO-80) | One env-var away for report comparisons; the loader dispatches transparently. |
 | Processing layer (a) | +15% context pad → square pad (neutral 114-gray) → 224x224 LANCZOS | ViT-native input without aspect-ratio distortion; context preserved. |
 | Processing layer (b) | **Method B** — `cv2.Laplacian` variance + `cv2.Canny` density → ψ; refs 500 / 0.10; tie-break margin 0.15 | Classical physics separates transparent glass vs plastic with zero retraining; tie-breaker only, fully audited in the payload. |
 | Stage 2 classifier | **`edwinpalegre/ee8225-group4-vit-trashnet-enhanced`** via HF `transformers` image-classification pipeline | Supervised ViT-B/16, TrashNet-enhanced, 98.17% val acc, Apache-2.0; native 7 labels (verified) map 1:1 onto the taxonomy. |
 | Label mapping | model `trash` → system `general rubbish`; all other labels identity | `MODEL_LABEL_TO_MATERIAL` in classification_service; tests enforce full coverage. |
 | Stage 1 tuning | `conf=0.15` default (per-request override) — **the only knob; NMS-free** | Recall-first; Stage 2 carries per-item certainty. |
-| Carbon scaling | `estimated_carbon_kg = base x (mask_area_px / γ)`, **γ = 5000** | Pixel area as volume/mass proxy until Step 5's real weights. |
+| Carbon scaling | `estimated_carbon_kg = base x (box_area_px / γ)`, **γ = 8000** (recalibrated from 5000 for rectangular over-coverage, fill factor ~0.6) | Box area as volume/mass proxy until Step 5's real weights. |
 | Carbon provider | **Climatiq** (Step 5). Until then: **dummy per-kg coefficients** in `carbon_service.py` keyed on the 7 materials | Keeps the JSON contract flowing end-to-end today; Step 5 swaps internals only. |
 | Recommendation engine | **Rule-based core + OPTIONAL LLM enrichment** | Deterministic engine is the gradeable default; LLM activates only when an API key is present. Must work fully with no LLM key. |
 | Backend | **Flask** (app factory + blueprints + services) | Thin controllers, logic in services. |
-| Frontend | HTML5 + Tailwind CSS + native JS (ES6+, Fetch API) + GSAP | SPA. Current interim page is a vanilla "Test Brain" tester with polygon-mask overlay + inspector; polished UI is Step 7. |
+| Frontend | HTML5 + Tailwind CSS + native JS (ES6+, Fetch API) + GSAP | SPA. Current interim page is a vanilla "Test Brain" tester with a classic bounding-box overlay + inspector; polished UI is Step 7. |
 | Database | SQLite (optional, for scan history) | Lightweight, local, file-based. |
 
 ---
@@ -204,9 +219,9 @@ Upload (multipart image)
 
 - **Language:** Python 3.11
 - **ML / Stage 1:** PyTorch, Ultralytics (`ultralytics==8.4.90`) running the
-  **specialist waste segmenter** `models/yolov8m-seg-trash.pt` (~55 MB; HF
-  `turhancan97/yolov8-segment-trash-detection`, auto-fetched via `huggingface_hub`
-  if missing; YOLOv8-M-seg fine-tuned on TACO + TrashNet, MIT)
+  **specialist waste object detector** `models/yolov8n-waste-det.pt` (~6 MB;
+  GitHub `gianlucasposito/YOLO-Waste-Detection`, auto-fetched via `requests`
+  if missing; YOLOv8-N fine-tuned on a blended universal waste corpus, MIT)
 - **ML / Stage 2:** Hugging Face `transformers==4.44.2` image-classification pipeline
   with **`edwinpalegre/ee8225-group4-vit-trashnet-enhanced`** (supervised ViT-B/16,
   ~343 MB, HF cache on first load)
@@ -214,7 +229,7 @@ Upload (multipart image)
   (`opencv-python-headless` — Method B: Laplacian variance + Canny edge density
   → Plasticity Index ψ), NumPy
 - **Backend:** Flask 3, Flask-SQLAlchemy, python-dotenv, requests, pydantic
-- **Frontend:** HTML5, Tailwind CSS, vanilla JavaScript (Fetch API), GSAP (Step 7); interim test page is dependency-free vanilla HTML/CSS/JS (Canvas 2D + Path2D polygon rendering)
+- **Frontend:** HTML5, Tailwind CSS, vanilla JavaScript (Fetch API), GSAP (Step 7); interim test page is dependency-free vanilla HTML/CSS/JS (Canvas 2D `strokeRect` bounding-box rendering)
 - **Database:** SQLite (via SQLAlchemy)
 - **External APIs:** Climatiq (carbon, Step 5) — Carbon Interface kept as alternate adapter
 - **Optional:** Anthropic/LLM API for recommendation enrichment
@@ -245,7 +260,7 @@ waste-detection-app/
 │   │   ├── carbon_service.py           # base coefficients + pixel-area dynamic scaling (γ)
 │   │   └── recommendation_service.py   # rule-based + optional LLM (Step 6)
 │   ├── models/scan.py     # SQLite model for optional scan history
-│   ├── schemas/           # pydantic validation models (JSON contract incl. polygon/mask_area)
+│   ├── schemas/           # pydantic validation models (JSON contract incl. box_area/physics)
 │   ├── utils/errors.py    # ApiError + register_error_handlers()
 │   ├── static/            # css/ js/ uploads/
 │   └── templates/index.html   # "Test Brain" tester page (full SPA in Step 7)
@@ -267,21 +282,21 @@ waste-detection-app/
 
 ## 5. LOCKED: Stage Vocabularies & Label Mapping
 
-### Stage 1 — the segmenter's NATIVE waste vocabulary (5 coarse labels)
+### Stage 1 — the detector's NATIVE waste vocabulary (5 coarse labels)
 
 Stage 1 runs the specialist checkpoint's own classes — verified live from the
 weights: `Glass, Metal, Paper, Plastic, Waste`. There is no `LOCALIZER_CLASSES`
 list and no `set_classes()` call — **do not reintroduce them** (anchor prompting is
 archived in §11 after failing empirically). What matters:
 
-- The model was fine-tuned on waste imagery only (TACO wild litter + TrashNet
-  household recyclables), so it masks trash-like objects and inherently ignores
+- The model was fine-tuned on waste imagery only (a blended corpus of wild litter
+  + household recyclables), so it boxes trash-like objects and largely ignores
   background furniture/floors/plants. Its generic `Waste` class catches amorphous
   litter with no rigid shape.
 - The label each instance fired as is carried in the payload as **`located_as`** —
-  strictly a diagnostic for auditing ("why does this mask exist?"). Identity comes
+  strictly a diagnostic for auditing ("why does this box exist?"). Identity comes
   from Stage 2 (+ the ψ tie-break); the pipeline never branches on `located_as` —
-  even though the segmenter's labels *look* like materials, they are coarse,
+  even though the detector's labels *look* like materials, they are coarse,
   unvalidated, and NOT the verdict.
 - The predict call passes `conf` only; suppression is the library's default
   behaviour for these weights.
@@ -321,45 +336,46 @@ Rules:
 ## 6. Module Specifications
 
 ### Module 1 — AI Multi-Target Waste Detection (Dual-Tower Hybrid, 100% local)
-- **Goal:** segment + classify multiple waste items in cluttered, real-world images —
+- **Goal:** detect + classify multiple waste items in cluttered, real-world images —
   including crushed/deformed and tightly packed items — with **no training of any
   kind** and no cloud inference.
 - **Input:** user-uploaded image (complex background, single or multiple targets).
 - **Output:** array of `{ class_name, display_name, confidence, box_confidence,
-  located_as, bbox:[x1,y1,x2,y2], polygon:[[x,y],...], mask_area_px,
-  material_scores[7], carbon_factor_kg_per_kg, estimated_carbon_kg }`.
+  located_as, bbox:[x1,y1,x2,y2], box_area_px, material_scores[7],
+  physics{...}, carbon_factor_kg_per_kg, estimated_carbon_kg }`.
 - **Implementation:**
   - `detection_service.analyze_waste_pipeline(image_path, conf=None)` orchestrates:
-    `_locate_objects` (Stage 1: boxes via `box.xyxy`, masks via `result.masks.xy`,
-    shoelace `_polygon_area`) → `_prepare_patches` (processing layer a) →
+    `_locate_objects` (Stage 1: boxes via `box.xyxy`, clamped; geometric
+    `box_area_px`) → `_prepare_patches` (processing layer a) →
     `classify_crops` (Stage 2) → `extract_classical_physics_features` +
     `_apply_plasticity_tiebreak` (processing layer b / Method B) → carbon
     annotation (base + dynamic).
-  - Boxes clamped to image bounds; sub-2px boxes skipped (their masks with them);
-    polygon vertices clamped for the payload while the AREA uses the raw float mask
-    vertices; a mask-less checkpoint falls back to box-corner polygons + box area.
+  - Boxes clamped to image bounds; sub-2px boxes skipped; `box_area_px` is the
+    area of the CLAMPED rectangle.
   - `_load_model` resolution: existing file → load; missing but registered in
-    `_HF_WEIGHT_SOURCES` (the specialist weights) → `hf_hub_download` + copy into
-    place; bare official name → Ultralytics auto-download. "rtdetr" filenames load
-    via the `RTDETR` class (archived pivot compat); everything else via `YOLO`.
+    `_WEIGHT_SOURCES` (specialist weights, via direct URL or the HF hub) →
+    download + copy into place; bare official name → Ultralytics auto-download.
+    "rtdetr" filenames load via the `RTDETR` class (archived pivot compat);
+    everything else via `YOLO`.
   - Both towers are cached singletons (`lru_cache`); heavy imports stay lazy so tests
     import services freely.
   - Stage-1 threshold: `CONFIDENCE_THRESHOLD` (default **0.15**, recall-first);
     per-request `conf` form-field override (clamped to [0.01, 1.0]). The predict
     call passes conf only. Device from `INFERENCE_DEVICE` for both towers.
   - All failures surface as `ApiError`; empty detections are a valid result.
-- **Hardware:** CPU works (a few seconds per image); GTX 1650 handles both towers'
-  *inference* easily (v8-M-seg ~0.2 GB + ViT-B/16 ~0.35 GB — inside the 4 GB budget).
-- **First-run downloads:** `models/yolov8m-seg-trash.pt` (~55 MB, HF hub) + the
+- **Hardware:** CPU works (well under a second per image for the nano detector);
+  GTX 1650 handles both towers' *inference* trivially (v8-N ~0.05 GB + ViT-B/16
+  ~0.35 GB — far inside the 4 GB budget).
+- **First-run downloads:** `models/yolov8n-waste-det.pt` (~6 MB, GitHub) + the
   TrashNet ViT (~343 MB, HF cache). Internet needed once.
 
 ### Module 2 — Carbon Impact Estimation (External API + pixel-area scaling, NO ML)
 - **Current:** `carbon_service.DUMMY_CARBON_FACTORS` — placeholder per-kg CO2e base
   coefficients for **all 7 materials** (biodegradable 0.57, cardboard 0.94, glass 0.85,
-  metal 4.50, paper 1.09, plastic 3.10, general rubbish 1.20), plus the **pixel-area
-  dynamic scaling**: `estimate_dynamic_impact(label, mask_area_px)` = base ×
-  (area / γ), γ = `PIXEL_AREA_GAMMA` = 5000. Coefficients are order-of-magnitude
-  realistic, clearly marked dummy.
+  metal 4.50, paper 1.09, plastic 3.10, general rubbish 1.20), plus the **box-area
+  dynamic scaling**: `estimate_dynamic_impact(label, box_area_px)` = base ×
+  (area / γ), γ = `PIXEL_AREA_GAMMA` = 8000 (recalibrated for rectangular
+  over-coverage). Coefficients are order-of-magnitude realistic, clearly marked dummy.
 - **Step 5:** swap lookup internals for live Climatiq calls (material + user-entered
   weight (kg) + ISO country code), async per item, aggregate total CO2e. Public
   signatures (`get_carbon_factor`, `estimate_impact`, `estimate_dynamic_impact`)
@@ -376,14 +392,16 @@ Rules:
 ### Module 4 — Web Application
 - **Current interim page (`templates/index.html`):** the "Dual-Tower Test Brain" —
   drag-drop/file-picker upload, instant local preview, **Analyze** button, Stage-1
-  threshold slider, **polygon mask canvas overlay** (semi-transparent per-material
-  fills + outlines via Path2D, point-in-polygon hover/click hit-testing, smallest
-  mask wins on overlap), and an **interactive inspector**: when analysis completes
-  the most confident item is auto-pinned showing its 7-class ViT score bars, the
-  mask pixel area, the Method B physics readout (ψ, wrinkle variance, edge density,
-  and whether the tie-break corrected the ranking), and the full carbon formula
-  readout (base × area ÷ γ); hovering or clicking any mask (or list row) walks the
-  other items. Raw JSON panel below. Vanilla HTML/CSS/JS, zero dependencies.
+  threshold slider, **classic bounding-box canvas overlay** (`ctx.strokeRect` with
+  crisp semi-transparent per-material borders + a very light interior tint,
+  rectangular hover/click hit-testing, smallest box wins on overlap, label chips
+  over the top-left corner), and an **interactive inspector**: when analysis
+  completes the most confident item is auto-pinned showing its 7-class ViT score
+  bars, the box pixel area, the Method B physics readout (ψ, wrinkle variance,
+  edge density, and whether the tie-break corrected the ranking), and the full
+  carbon formula readout (base × area ÷ γ); hovering or clicking any box (or list
+  row) walks the other items. Raw JSON panel below. Vanilla HTML/CSS/JS, zero
+  dependencies.
 - **Step 7:** the polished SPA — Tailwind layout, GSAP transitions, per-item weight
   inputs + country selector, carbon dashboard, recommendation list.
 
@@ -396,7 +414,7 @@ Rules:
 - **Config:** class-based in `config.py`; the factory selects via `FLASK_ENV`. Never hardcode secrets — read from `.env` through `config.py`.
 - **App factory:** `create_app(env_name)` builds the app. No global `app` object.
 - **Errors:** services raise `app.utils.errors.ApiError(message, status_code)`. A registered handler converts it to JSON.
-- **Validation:** pydantic schemas in `app/schemas/` are the documented JSON contract (incl. `polygon`, `mask_area_px`, `material_scores`, `estimated_carbon_kg`); validate payloads before touching services.
+- **Validation:** pydantic schemas in `app/schemas/` are the documented JSON contract (incl. `box_area_px`, `material_scores`, `physics`, `estimated_carbon_kg`); validate payloads before touching services.
 - **Secrets:** `.env` is gitignored. `.env.example` documents required keys with blank values.
 - **External calls:** wrap all `requests` calls with timeouts and explicit error handling; never let an upstream failure 500 silently.
 - **Logging:** use `app.logger` / module loggers, not `print`.
@@ -419,8 +437,8 @@ CARBON_INTERFACE_API_KEY=         # only if using that provider
 LLM_API_KEY=                      # OPTIONAL — leave blank for rule-based only
 LLM_MODEL=claude-sonnet-4-6
 
-MODEL_PATH=models/yolov8m-seg-trash.pt   # Stage 1 specialist (auto-fetched from HF if missing)
-                                          # A/B baseline: MODEL_PATH=yolo26x-seg.pt (COCO-80)
+MODEL_PATH=models/yolov8n-waste-det.pt   # Stage 1 specialist detector (auto-fetched if missing)
+                                          # A/B: models/yolov8m-seg-trash.pt | yolo26x-seg.pt
 VIT_MODEL_NAME=edwinpalegre/ee8225-group4-vit-trashnet-enhanced   # Stage 2 (HF model id)
 CONFIDENCE_THRESHOLD=0.15         # Stage 1, recall-first — the ONLY Stage-1 knob (NMS-free)
 INFERENCE_DEVICE=0                # BOTH towers: "cpu" or CUDA index ("0")
@@ -483,7 +501,8 @@ Each completed step gets its own commit + push — see §13 for the commit conve
 | 4.7 | CRITICAL FIX: vanilla YOLOv8-L (stock COCO-80) replaces YOLO-World as Stage 1 after abstract anchors produced 0 detections; COCO labels kept as `located_as` diagnostics | **DONE (locator superseded by 4.8)** |
 | 4.8 | UPGRADE: RT-DETR-X detection transformer replaces YOLOv8 as Stage 1 — global self-attention, NMS-free (IoU knob removed) | **DONE (superseded by 4.9)** |
 | 4.9 | DUAL-TOWER HYBRID: YOLO26-X-SEG instance segmentation + context-aware square padding + supervised TrashNet ViT replaces CLIP + pixel-area dynamic carbon scaling (γ=5000) + polygon-mask frontend | **DONE (locator superseded by 4.10)** |
-| 4.10 | **SPECIALIST LOCATOR + METHOD B: blended TACO+TrashNet waste segmenter (yolov8m-seg-trash.pt) replaces COCO-80 Stage 1 (background noise filtered architecturally) + classical-CV Plasticity Index ψ tie-breaker for ambiguous plastic-vs-glass ViT calls (fully audited in the payload)** | **DONE (this step)** |
+| 4.10 | SPECIALIST LOCATOR + METHOD B: blended TACO+TrashNet waste segmenter (yolov8m-seg-trash.pt) replaces COCO-80 Stage 1 + classical-CV Plasticity Index ψ tie-breaker | **DONE (locator superseded by 4.11)** |
+| 4.11 | **DETECTION REGRESSION: specialist waste OBJECT DETECTOR (yolov8n-waste-det.pt, blended corpus) replaces segmentation as Stage 1 — box-area carbon proxy with γ recalibrated 5000→8000, classic strokeRect frontend, cleaner background rejection, nano-speed edge throughput; Method B + ViT unchanged** | **DONE (this step)** |
 | 5 | Carbon module — real Climatiq calls in `carbon_service` + `POST /api/calculate-impact` | **Next** |
 | 6 | Recommendation module — rule-based + optional LLM enrichment | Pending |
 | 7 | Frontend — full SPA: Tailwind/GSAP, weight forms, results dashboard | Pending |
@@ -539,6 +558,18 @@ fixes both architecturally; the COCO baseline stays one env-var away
 community checkpoint has no published metrics and reintroduces default NMS
 (v8-family), accepted in exchange for waste-only recall.
 
+**Pivot v3.1 — dual-tower with the blended-waste SEGMENTER.** The specialist
+`yolov8m-seg-trash.pt` (TACO + TrashNet fine-tune) introduced waste-only
+localization and carried the mask-based pixel-area carbon scaling (γ=5000).
+**Why the locator was replaced (upgrade):** detection-only v3.2 trades the tight
+mask contours for (1) ~9x smaller weights and no mask-decoding overhead — real
+frame-rate gains on edge hardware; (2) no mask-suppression merge artifacts in
+dense, tightly packed layouts; (3) empirically cleaner background rejection on
+out-of-domain scenes (2 vs 5 false fires at conf=0.15 on the bus-scene probe).
+The cost — box areas over-cover tight contours — is absorbed by recalibrating
+γ to 8000 (measured fill factor ~0.6). The segmenter stays one env-var away
+(`MODEL_PATH=models/yolov8m-seg-trash.pt`) for A/B mask-vs-box comparisons.
+
 **Stage-2 v1 — zero-shot CLIP (`openai/clip-vit-base-patch32`).** Scored each crop
 against the taxonomy via the prompt `"a photo of {} waste"`. **Why replaced:** the
 supervised TrashNet ViT has actually *trained on waste imagery* (98.17% val acc on
@@ -587,15 +618,18 @@ retraining), whereas CLIP's was editable text.
 - **Never** suggest Python 3.13 or bash-only commands for this Windows/PowerShell user.
 - **Never** delete or "clean up" the `ml/` workspace, legacy scripts, notebooks, or
   their tests — they are FYP report material (§2, §12).
-- The locator weight is **`models/yolov8m-seg-trash.pt`** (specialist; auto-fetched
-  from HF `turhancan97/yolov8-segment-trash-detection` via `_HF_WEIGHT_SOURCES` when
-  missing). The A/B baseline is `yolo26x-seg.pt` — NO dash between "26" and "x";
-  requires `ultralytics>=8.4` (pinned 8.4.90) — never downgrade to 8.3.x.
+- The locator weight is **`models/yolov8n-waste-det.pt`** (specialist detector;
+  auto-fetched from GitHub via `_WEIGHT_SOURCES` when missing). A/B alternatives:
+  `models/yolov8m-seg-trash.pt` (v3.1 masks) and `yolo26x-seg.pt` — NO dash between
+  "26" and "x"; requires `ultralytics>=8.4` (pinned 8.4.90) — never downgrade.
 - `_load_model` still dispatches "rtdetr" names to the `RTDETR` class (archived
   pivot compatibility); everything else loads via `YOLO`. Legacy trained weights
   were `yolo11n.pt` (no "v"). Don't mix naming schemes.
-- First model load downloads `models/yolov8m-seg-trash.pt` (~55 MB, HF hub) +
+- First model load downloads `models/yolov8n-waste-det.pt` (~6 MB, GitHub) +
   ~343 MB TrashNet ViT (HF cache). Keep `*.pt` gitignored; never commit weights.
+- The carbon size proxy is the **clamped box area** — a rectangle includes
+  background, which is exactly why γ is 8000 here vs the mask-era 5000. If a
+  future locator brings masks back, revisit γ alongside it.
 - **Never** reintroduce `set_classes()` / anchor prompts into Stage 1 — running the
   checkpoint's native vocabulary is a deliberate, empirically-motivated decision
   (§2, §11). `located_as` is diagnostic-only — even though the specialist's labels
@@ -616,10 +650,7 @@ retraining), whereas CLIP's was editable text.
 - The ViT's native `trash` label MUST map to `general rubbish` via
   `MODEL_LABEL_TO_MATERIAL`; the 7 material strings, `DISPLAY_NAMES`, and
   `DUMMY_CARBON_FACTORS` stay in **lockstep** (§5) — tests enforce both.
-- The mask pixel AREA is computed from the raw float `masks.xy` vertices (shoelace);
-  the payload `polygon` is clamped ints. A mask-less checkpoint falls back to
-  box-corner polygons + box area — don't remove that fallback.
-- γ (`PIXEL_AREA_GAMMA` = 5000) is a code constant in `carbon_service.py`, not env.
+- γ (`PIXEL_AREA_GAMMA` = 8000) is a code constant in `carbon_service.py`, not env.
 - Do not squish crops for the ViT — the processing layer's square padding exists to
   preserve aspect ratio (§2); never replace it with a naive resize.
 - **Never** put business logic in route handlers — services only.

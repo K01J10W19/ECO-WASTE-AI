@@ -1,15 +1,14 @@
 """
-Unit tests for app/services/detection_service.py (Dual-Tower Hybrid v3.1).
+Unit tests for app/services/detection_service.py (Dual-Tower Hybrid v3.2).
 
-Stage 1 (specialist waste segmenter, 5 coarse labels + instance masks) and
-Stage 2 (TrashNet ViT classifier) are both monkeypatched, so these tests need
-NO real weights, NO GPU and NO network. The processing layer (square padding +
+Stage 1 (specialist waste object detector, 5 coarse labels) and Stage 2
+(TrashNet ViT classifier) are both monkeypatched, so these tests need NO real
+weights, NO GPU and NO network. The processing layer (square padding +
 Method B physics extractor) runs for real on tiny generated images. We verify
-the segment → pad → classify → tie-break → carbon composition, the
-polygon/mask-area payload, the pixel-area dynamic carbon formula, the psi
-plastic-vs-glass tie-breaker, box clamping, the box-corner fallback when a
-checkpoint yields no masks, the Stage-1 conf override, and that an empty
-result is valid.
+the detect → pad → classify → tie-break → carbon composition, the
+box-area payload, the box-area dynamic carbon formula (gamma = 8000), the psi
+plastic-vs-glass tie-breaker, box clamping, the Stage-1 conf override, and
+that an empty result is valid.
 """
 import types
 
@@ -20,8 +19,8 @@ from app.services import classification_service as cs
 from app.services.carbon_service import PIXEL_AREA_GAMMA
 from app.schemas.detection import DetectionResult
 
-# The names dict the specialist waste segmenter exposes (verified live).
-_SEG_NAMES = {0: "Glass", 1: "Metal", 2: "Paper", 3: "Plastic", 4: "Waste"}
+# The names dict the specialist waste detector exposes (verified live).
+_DET_NAMES = {0: "Glass", 1: "Metal", 2: "Paper", 3: "Plastic", 4: "Waste"}
 
 
 def _fake_box(conf, xyxy, cls_id=3):
@@ -29,13 +28,10 @@ def _fake_box(conf, xyxy, cls_id=3):
     return types.SimpleNamespace(cls=[cls_id], conf=[conf], xyxy=[xyxy])
 
 
-def _fake_model(boxes, polys=None, width=1280, height=720):
-    """A stand-in waste-seg locator whose predict() returns one result.
-    ``polys`` mirrors result.masks.xy (one vertex array per box, same order);
-    None mimics a mask-less (plain detection) checkpoint."""
-    masks = types.SimpleNamespace(xy=polys) if polys is not None else None
-    result = types.SimpleNamespace(orig_shape=(height, width), boxes=boxes, masks=masks)
-    return types.SimpleNamespace(names=_SEG_NAMES, predict=lambda *a, **k: [result])
+def _fake_model(boxes, width=1280, height=720):
+    """A stand-in waste detector whose predict() returns one result."""
+    result = types.SimpleNamespace(orig_shape=(height, width), boxes=boxes)
+    return types.SimpleNamespace(names=_DET_NAMES, predict=lambda *a, **k: [result])
 
 
 def _scores(winner, score=0.83):
@@ -63,21 +59,12 @@ def _real_image(tmp_path, width=1280, height=720):
     return str(p)
 
 
-def _rect_poly(x1, y1, x2, y2):
-    """A rectangular mask polygon (shoelace area == (x2-x1)*(y2-y1))."""
-    return [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
-
-
 def test_dual_tower_composition(app, monkeypatch, tmp_path):
     boxes = [
-        _fake_box(0.41, [10.0, 20.0, 110.0, 120.0], cls_id=4),   # segmenter says "Waste"
-        _fake_box(0.90, [200.0, 200.0, 400.0, 380.0], cls_id=3),  # segmenter says "Plastic"
+        _fake_box(0.41, [10.0, 20.0, 110.0, 120.0], cls_id=4),   # detector says "Waste"
+        _fake_box(0.90, [200.0, 200.0, 400.0, 380.0], cls_id=3),  # detector says "Plastic"
     ]
-    polys = [
-        _rect_poly(10, 20, 110, 120),     # area 100*100 = 10,000 px²
-        _rect_poly(200, 200, 400, 380),   # area 200*180 = 36,000 px²
-    ]
-    monkeypatch.setattr(ds, "get_model", lambda: _fake_model(boxes, polys))
+    monkeypatch.setattr(ds, "get_model", lambda: _fake_model(boxes))
     monkeypatch.setattr(ds, "classify_crops", _fake_classify(["plastic", "glass"]))
 
     with app.app_context():
@@ -87,26 +74,25 @@ def test_dual_tower_composition(app, monkeypatch, tmp_path):
     assert len(out["items"]) == 2
 
     first = out["items"][0]
-    assert first["class_name"] == "plastic"           # Stage-2 verdict — NOT the segmenter label
+    assert first["class_name"] == "plastic"           # Stage-2 verdict — NOT the detector label
     assert first["display_name"] == "Plastic"
     assert first["confidence"] == 0.83                # ViT softmax score
     assert first["box_confidence"] == 0.41            # Stage-1 localization score
-    assert first["located_as"] == "Waste"             # segmenter label kept as diagnostic only
+    assert first["located_as"] == "Waste"             # detector label kept as diagnostic only
     assert first["bbox"] == [10, 20, 110, 120]
-    assert first["polygon"] == _rect_poly(10, 20, 110, 120)
-    assert first["mask_area_px"] == 10000.0           # shoelace area of the mask
+    assert first["box_area_px"] == 10000.0            # (110-10) * (120-20)
     assert first["material_scores"][0]["label"] == "plastic"
     assert len(first["material_scores"]) == len(cs.MATERIAL_CLASSES)
     assert first["carbon_factor_kg_per_kg"] == 3.10
-    # Dynamic formula: base x (area / gamma) = 3.10 x (10000 / 5000) = 6.2
+    # Dynamic formula: base x (box area / gamma) = 3.10 x (10000 / 8000)
     assert first["estimated_carbon_kg"] == round(3.10 * 10000 / PIXEL_AREA_GAMMA, 4)
     # Method B evidence rides along; a clear 0.83 verdict is never tie-broken.
     assert first["physics"]["tiebreak_applied"] is False
     assert 0.0 <= first["physics"]["plasticity_index"] <= 1.0
 
     second = out["items"][1]
-    assert second["class_name"] == "glass"            # even though the segmenter said "Plastic"
-    assert second["mask_area_px"] == 36000.0
+    assert second["class_name"] == "glass"            # even though the detector said "Plastic"
+    assert second["box_area_px"] == 36000.0           # 200 * 180
     assert second["estimated_carbon_kg"] == round(0.85 * 36000 / PIXEL_AREA_GAMMA, 4)
     DetectionResult(**out)                            # response matches the schema
 
@@ -116,12 +102,8 @@ def test_boxes_clamped_and_degenerate_skipped(app, monkeypatch, tmp_path):
         _fake_box(0.50, [-15.0, -10.0, 900.0, 800.0]),  # spills past the 640x480 image
         _fake_box(0.60, [100.0, 100.0, 101.0, 300.0]),  # 1px wide -> unclassifiable, skipped
     ]
-    polys = [
-        _rect_poly(-15, -10, 900, 800),   # raw shoelace area = 915 * 810
-        _rect_poly(100, 100, 101, 300),   # skipped along with its box
-    ]
     monkeypatch.setattr(ds, "get_model",
-                        lambda: _fake_model(boxes, polys, width=640, height=480))
+                        lambda: _fake_model(boxes, width=640, height=480))
     monkeypatch.setattr(ds, "classify_crops", _fake_classify(["general rubbish"]))
 
     with app.app_context():
@@ -130,30 +112,13 @@ def test_boxes_clamped_and_degenerate_skipped(app, monkeypatch, tmp_path):
     assert len(out["items"]) == 1                        # degenerate instance dropped
     item = out["items"][0]
     assert item["bbox"] == [0, 0, 640, 480]              # clamped to image bounds
-    assert all(0 <= x <= 640 and 0 <= y <= 480           # polygon vertices clamped too
-               for x, y in item["polygon"])
-    assert item["mask_area_px"] == 915.0 * 810.0         # area from the raw mask vertices
+    assert item["box_area_px"] == 640.0 * 480.0          # area of the CLAMPED box
     assert item["carbon_factor_kg_per_kg"] == 1.20
-
-
-def test_maskless_checkpoint_falls_back_to_box_polygon(app, monkeypatch, tmp_path):
-    # A plain detection checkpoint (masks=None) must not break the contract.
-    boxes = [_fake_box(0.70, [10.0, 10.0, 60.0, 40.0])]
-    monkeypatch.setattr(ds, "get_model", lambda: _fake_model(boxes, polys=None))
-    monkeypatch.setattr(ds, "classify_crops", _fake_classify(["metal"]))
-
-    with app.app_context():
-        out = ds.analyze_waste_pipeline(_real_image(tmp_path))
-
-    item = out["items"][0]
-    assert item["polygon"] == _rect_poly(10, 10, 60, 40)  # box corners stand in
-    assert item["mask_area_px"] == 50.0 * 30.0            # box area stands in
-    DetectionResult(**out)
 
 
 def test_empty_detections_is_not_an_error(app, monkeypatch, tmp_path):
     monkeypatch.setattr(ds, "get_model",
-                        lambda: _fake_model([], polys=[], width=640, height=480))
+                        lambda: _fake_model([], width=640, height=480))
     # No instances -> no patches -> the REAL classify_crops([]) short-circuits to [].
 
     with app.app_context():
@@ -170,8 +135,7 @@ def test_conf_override_surfaces_more_detections(app, monkeypatch, tmp_path):
         _fake_box(0.90, [10.0, 20.0, 110.0, 120.0]),
         _fake_box(0.10, [0.0, 0.0, 50.0, 50.0]),
     ]
-    polys = [_rect_poly(10, 20, 110, 120), _rect_poly(0, 0, 50, 50)]
-    monkeypatch.setattr(ds, "get_model", lambda: _fake_model(boxes, polys))
+    monkeypatch.setattr(ds, "get_model", lambda: _fake_model(boxes))
 
     def classify(crops):  # length adapts to however many instances survived
         return [_scores("metal") for _ in crops]
@@ -241,8 +205,7 @@ def test_pipeline_applies_tiebreak_on_smooth_patch(app, monkeypatch, tmp_path):
     # Ambiguous plastic-vs-glass ViT call on a flat gray image: the real
     # physics extractor reads the patch as glass-like and flips the verdict.
     boxes = [_fake_box(0.60, [10.0, 20.0, 110.0, 120.0], cls_id=0)]
-    polys = [_rect_poly(10, 20, 110, 120)]
-    monkeypatch.setattr(ds, "get_model", lambda: _fake_model(boxes, polys))
+    monkeypatch.setattr(ds, "get_model", lambda: _fake_model(boxes))
 
     ambiguous = [{"label": "plastic", "score": 0.48}, {"label": "glass", "score": 0.42},
                  {"label": "metal", "score": 0.05}, {"label": "paper", "score": 0.05}]
@@ -258,14 +221,6 @@ def test_pipeline_applies_tiebreak_on_smooth_patch(app, monkeypatch, tmp_path):
     assert item["physics"]["plasticity_index"] < 0.5
     assert item["carbon_factor_kg_per_kg"] == 0.85    # carbon follows the corrected label
     DetectionResult(**out)
-
-
-def test_polygon_area_shoelace():
-    # Rectangle, triangle, and degenerate cases pin the area math the carbon
-    # formula depends on.
-    assert ds._polygon_area([[0, 0], [10, 0], [10, 5], [0, 5]]) == 50.0
-    assert ds._polygon_area([[0, 0], [10, 0], [0, 10]]) == 50.0
-    assert ds._polygon_area([[0, 0], [10, 0]]) == 0.0   # < 3 vertices
 
 
 def test_taxonomy_lockstep():

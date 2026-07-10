@@ -33,11 +33,17 @@ DUMMY_CARBON_FACTORS = {
 DEFAULT_CARBON_FACTOR = 1.00
 
 # Calibration constant for the pixel-area dynamic scaling (the academic core
-# feature): gamma is the reference pixel density — a mask of exactly gamma
-# pixels scores 1x its base material coefficient. Larger masks scale up,
-# smaller masks scale down, so on-screen size acts as a physical volume/mass
+# feature): gamma is the reference pixel density — an area of exactly gamma
+# pixels scores 1x its base material coefficient. Larger areas scale up,
+# smaller areas scale down, so on-screen size acts as a physical volume/mass
 # proxy until real user-entered weights arrive with Climatiq (Step 5).
-PIXEL_AREA_GAMMA = 5000.0
+#
+# RECALIBRATED for BOX areas (v3.2): the detector supplies rectangular
+# (x2-x1)*(y2-y1) areas, and a bounding rectangle over-covers a tight object
+# contour by ~1.6x on measured waste samples (mask/box fill factor ~0.6).
+# The mask-era gamma of 5000 is therefore scaled to 5000 / 0.625 = 8000 so
+# carbon magnitudes stay comparable across the locator generations.
+PIXEL_AREA_GAMMA = 8000.0
 
 
 def get_carbon_factor(label: str) -> float:
@@ -62,16 +68,18 @@ def estimate_impact(label: str, weight_kg: float) -> float:
     return round(get_carbon_factor(label) * weight_kg, 4)
 
 
-def estimate_dynamic_impact(label: str, mask_area_px: float) -> float:
+def estimate_dynamic_impact(label: str, area_px: float) -> float:
     """
     Pixel-area dynamic carbon estimate (kg CO2e) for one detected instance::
 
-        Final Carbon Impact = Base Material Coefficient x (Mask Pixel Area / gamma)
+        Box Area            = (x2 - x1) * (y2 - y1)
+        Final Carbon Impact = Base Material Coefficient x (Box Area / gamma)
 
-    The instance-segmentation mask's enclosed pixel area stands in for the
-    item's physical volume/mass until Step 5 introduces user-entered weights.
-    ``gamma`` (PIXEL_AREA_GAMMA) is the reference pixel density.
+    The bounding box's geometric pixel area stands in for the item's physical
+    volume/mass until Step 5 introduces user-entered weights. ``gamma``
+    (PIXEL_AREA_GAMMA, recalibrated to 8000 for rectangular over-coverage) is
+    the reference pixel density.
     """
-    if mask_area_px < 0:
-        raise ValueError("mask_area_px must be non-negative")
-    return round(get_carbon_factor(label) * (mask_area_px / PIXEL_AREA_GAMMA), 4)
+    if area_px < 0:
+        raise ValueError("area_px must be non-negative")
+    return round(get_carbon_factor(label) * (area_px / PIXEL_AREA_GAMMA), 4)

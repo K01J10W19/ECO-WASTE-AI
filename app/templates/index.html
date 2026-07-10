@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Dual-Tower Test Brain — YOLO26-Seg + TrashNet ViT</title>
+  <title>Dual-Tower Test Brain — Waste Detection + TrashNet ViT</title>
   <style>
     :root { --bg:#0f172a; --card:#1e293b; --muted:#94a3b8; --fg:#e2e8f0; --accent:#38bdf8; --ok:#34d399; }
     * { box-sizing: border-box; }
@@ -87,11 +87,11 @@
 <body>
   <div class="wrap">
     <h1>🧠 Dual-Tower Test Brain</h1>
-    <p class="sub"><strong>Stage 1</strong> a specialized waste segmenter (TACO + TrashNet blend) masks ONLY
-      trash-like objects — background furniture/floors never fire →
+    <p class="sub"><strong>Stage 1</strong> a specialized waste detector (blended universal waste corpus)
+      boxes ONLY trash-like objects — background furniture/floors rarely fire →
       square padding + <strong>Method B</strong> physics (Laplacian wrinkles + Canny edges → ψ) →
       <strong>Stage 2</strong> TrashNet ViT names the material; ψ breaks ambiguous plastic-vs-glass calls.
-      Mask pixel area scales each carbon estimate. Hover or click a mask to inspect.</p>
+      Bounding-box pixel area scales each carbon estimate. Hover or click a box to inspect.</p>
 
     <!-- 1) Upload zone: click or drag & drop -->
     <div id="drop">
@@ -106,13 +106,13 @@
       <div class="conf-box">
         <label for="conf">Stage-1 threshold: <strong id="confVal">0.15</strong></label>
         <input id="conf" type="range" min="0.05" max="0.90" step="0.05" value="0.15" />
-        <span class="hint">Kept LOW on purpose — the segmenter should over-find; the ViT's material scores carry the certainty. YOLO26 is end-to-end NMS-free: confidence is the only knob.</span>
+        <span class="hint">Kept LOW on purpose — the detector should over-find; the ViT's material scores carry the certainty. Nudge higher (~0.30) for cluttered indoor scenes.</span>
       </div>
     </div>
 
     <div id="status"></div>
 
-    <!-- 3) Annotated canvas (polygon masks) + hover/click inspector -->
+    <!-- 3) Annotated canvas (bounding boxes) + hover/click inspector -->
     <div class="layout">
       <div class="canvas-col" id="shell" style="display:none">
         <img id="preview" alt="preview" />
@@ -128,10 +128,10 @@
     <pre id="json"></pre>
 
     <p class="note">Powered by <code>POST /api/predict</code> →
-      waste segmenter (<code>models/yolov8m-seg-trash.pt</code>, TACO+TrashNet blend)
+      waste detector (<code>models/yolov8n-waste-det.pt</code>, blended universal waste corpus)
       + Method B physics (ψ tie-breaker)
       + TrashNet ViT (<code>edwinpalegre/ee8225-group4-vit-trashnet-enhanced</code>, 224×224 patches) ·
-      carbon = base coefficient × (mask px² ÷ 5000) · first request downloads both models.</p>
+      carbon = base coefficient × (box px² ÷ 8000) · first request downloads both models.</p>
   </div>
 
   <script>
@@ -148,7 +148,7 @@
     };
     const FALLBACK_COLOR = "#f43f5e";
     const colorOf = (label) => MATERIAL_COLORS[label] || FALLBACK_COLOR;
-    // hex "#rrggbb" -> "rgba(r,g,b,a)" for the semi-transparent mask fills.
+    // hex "#rrggbb" -> "rgba(r,g,b,a)" for tinted fills and soft borders.
     function rgba(hex, a) {
       const n = parseInt(hex.slice(1), 16);
       return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
@@ -170,9 +170,8 @@
 
     let selectedFile = null;
     let state = null;        // { items, image, img, scale } after a successful analyze
-    let itemPaths = [];      // Path2D per item at current canvas scale (for hit-testing)
-    let hoveredId = null;    // mask under the cursor
-    let selectedId = null;   // mask pinned by click
+    let hoveredId = null;    // box under the cursor
+    let selectedId = null;   // box pinned by click
 
     confSlider.addEventListener("input", () => { confVal.textContent = confSlider.value; });
 
@@ -194,7 +193,7 @@
     function selectFile(file) {
       if (!file) return;
       selectedFile = file;
-      state = null; itemPaths = []; hoveredId = null; selectedId = null;
+      state = null; hoveredId = null; selectedId = null;
       preview.src = URL.createObjectURL(file);
       preview.style.display = "block";
       canvas.style.display = "none";
@@ -210,7 +209,7 @@
     analyzeBtn.addEventListener("click", async () => {
       if (!selectedFile) return;
       analyzeBtn.disabled = true;
-      setStatus("Analyzing… Stage 1 segments, Stage 2 classifies each padded patch (first request loads both models).");
+      setStatus("Analyzing… Stage 1 detects, Stage 2 classifies each padded patch (first request loads both models).");
 
       const form = new FormData();
       form.append("image", selectedFile);
@@ -243,7 +242,7 @@
 
         preview.style.display = "none";
         canvas.style.display = "block";
-        setStatus(`${data.items.length} item(s) · ${data.image.width}×${data.image.height}px — hover/click a mask for the ViT breakdown.`);
+        setStatus(`${data.items.length} item(s) · ${data.image.width}×${data.image.height}px — hover/click a box for the ViT breakdown.`);
         renderList();
 
         // Show the breakdown immediately: auto-pin the most confident item
@@ -251,63 +250,53 @@
         if (data.items.length) {
           selectedId = data.items.reduce((a, b) => (b.confidence > a.confidence ? b : a)).id;
         }
-        drawMasks();
+        drawBoxes();
         renderInspector(selectedId);
         highlightListRow();
       };
       img.onerror = () => setStatus("Could not load the uploaded image for preview.", true);
-      img.src = data.image.url;   // server-saved copy, so masks align with what the model saw
+      img.src = data.image.url;   // server-saved copy, so boxes align with what the model saw
     }
 
-    // Build a Path2D from an item's polygon vertices at the current scale.
-    function pathFor(item, scale) {
-      const path = new Path2D();
-      const poly = item.polygon;
-      if (!poly || poly.length < 3) return path;
-      path.moveTo(poly[0][0] * scale, poly[0][1] * scale);
-      for (let i = 1; i < poly.length; i++) path.lineTo(poly[i][0] * scale, poly[i][1] * scale);
-      path.closePath();
-      return path;
-    }
-
-    function drawMasks() {
+    function drawBoxes() {
       if (!state) return;
       const { items, img, scale } = state;
       const activeId = (hoveredId !== null) ? hoveredId : selectedId;
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-      itemPaths = items.map((it) => pathFor(it, scale));
       items.forEach((it) => {
+        const [x1, y1, x2, y2] = it.bbox.map((v) => v * scale);
+        const w = x2 - x1, h = y2 - y1;
         const color = colorOf(it.class_name);
         const active = it.id === activeId;
-        const path = itemPaths[it.id];
 
-        // Professional semi-transparent mask fill + crisp outline.
-        ctx.fillStyle = rgba(color, active ? 0.45 : 0.30);
-        ctx.fill(path);
+        // Enterprise dashboard look: crisp semi-transparent border with a
+        // very light interior tint; the active box gets a stronger presence.
+        ctx.fillStyle = rgba(color, active ? 0.16 : 0.05);
+        ctx.fillRect(x1, y1, w, h);
         ctx.lineWidth = active ? 3.5 : 2;
-        ctx.strokeStyle = color;
-        ctx.stroke(path);
+        ctx.strokeStyle = rgba(color, active ? 1.0 : 0.8);
+        ctx.strokeRect(x1, y1, w, h);
 
-        // Label chip anchored at the top of the item's bbox.
-        const [x1, y1] = [it.bbox[0] * scale, it.bbox[1] * scale];
+        // Label chip hovering over the top-left corner of the rectangle.
         const label = `${it.display_name} ${(it.confidence * 100).toFixed(0)}%`;
         ctx.font = "600 14px system-ui, sans-serif";
-        const w = ctx.measureText(label).width + 10;
+        const tw = ctx.measureText(label).width + 10;
         ctx.fillStyle = color;
-        ctx.fillRect(x1 - 1, Math.max(0, y1 - 20), w, 20);
+        ctx.fillRect(x1 - 1, Math.max(0, y1 - 20), tw, 20);
         ctx.fillStyle = "#0b1220";
         ctx.fillText(label, x1 + 4, Math.max(14, y1 - 6));
       });
     }
 
-    // Point-in-polygon hit test via Path2D; overlapping masks -> smallest area wins.
+    // Rectangular hit test; overlapping boxes -> smallest area wins.
     function hitTest(mx, my) {
       if (!state) return null;
       let best = null, bestArea = Infinity;
       state.items.forEach((it) => {
-        if (ctx.isPointInPath(itemPaths[it.id], mx, my) && it.mask_area_px < bestArea) {
-          bestArea = it.mask_area_px;
+        const [x1, y1, x2, y2] = it.bbox.map((v) => v * state.scale);
+        if (mx >= x1 && mx <= x2 && my >= y1 && my <= y2 && it.box_area_px < bestArea) {
+          bestArea = it.box_area_px;
           best = it.id;
         }
       });
@@ -320,14 +309,14 @@
       canvas.style.cursor = (id !== null) ? "pointer" : "default";
       if (id !== hoveredId) {
         hoveredId = id;
-        drawMasks();
+        drawBoxes();
         renderInspector(hoveredId !== null ? hoveredId : selectedId);
         highlightListRow();
       }
     });
     canvas.addEventListener("mouseleave", () => {
       hoveredId = null;
-      drawMasks();
+      drawBoxes();
       renderInspector(selectedId);
       highlightListRow();
     });
@@ -335,18 +324,18 @@
       const r = canvas.getBoundingClientRect();
       const id = hitTest(e.clientX - r.left, e.clientY - r.top);
       selectedId = (id === selectedId) ? null : id;   // click again to unpin
-      drawMasks();
+      drawBoxes();
       renderInspector(selectedId !== null ? selectedId : hoveredId);
       highlightListRow();
     });
 
-    // --- Inspector: ViT evidence + dynamic carbon math for one item --------
+    // --- Inspector: ViT evidence + physics + carbon math for one item ------
     function renderInspector(id) {
       inspector.style.display = "block";
       if (!state || id === null || !state.items[id]) {
-        inspector.innerHTML = `<span class="inspector-empty">Hover or click a segmentation mask
-          (or a row below) to inspect the ViT material analysis and the pixel-area
-          carbon estimate for that object.</span>`;
+        inspector.innerHTML = `<span class="inspector-empty">Hover or click a bounding box
+          (or a row below) to inspect the ViT material analysis, the Method B physics
+          cues, and the box-area carbon estimate for that object.</span>`;
         return;
       }
       const it = state.items[id];
@@ -361,10 +350,10 @@
       inspector.innerHTML = `
         <h3><span class="dot" style="background:${colorOf(it.class_name)}"></span>
             Item ${it.id + 1}: ${it.display_name}</h3>
-        <div class="meta">Stage 1 segmented this as &ldquo;${it.located_as}&rdquo;
+        <div class="meta">Stage 1 detected this as &ldquo;${it.located_as}&rdquo;
           (${(it.box_confidence * 100).toFixed(1)}%) — label discarded
           · ViT material confidence ${(it.confidence * 100).toFixed(1)}%
-          · mask ${Math.round(it.mask_area_px).toLocaleString()} px²<br>
+          · box ${Math.round(it.box_area_px).toLocaleString()} px²<br>
           Method B: ψ ${it.physics.plasticity_index.toFixed(2)}
           (wrinkle var ${Math.round(it.physics.laplacian_variance)},
           edges ${(it.physics.edge_density * 100).toFixed(1)}%)
@@ -374,7 +363,7 @@
         ${bars}
         <div class="carbon-line">≈ ${it.estimated_carbon_kg} kg CO₂e
           <small>= ${it.carbon_factor_kg_per_kg} (base ${it.display_name.toLowerCase()} coefficient)
-            × (${Math.round(it.mask_area_px).toLocaleString()} px² ÷ 5000 γ)
+            × (${Math.round(it.box_area_px).toLocaleString()} px² ÷ 8000 γ)
             — placeholder coefficients; live Climatiq + real weights land in Step 5</small>
         </div>`;
     }
@@ -382,24 +371,24 @@
     // --- Item list (rows mirror canvas hover/click) -------------------------
     function renderList() {
       if (!state.items.length) {
-        itemsEl.innerHTML = `<li style="cursor:default">No objects segmented — try lowering the Stage-1 threshold.</li>`;
+        itemsEl.innerHTML = `<li style="cursor:default">No waste detected — try lowering the Stage-1 threshold.</li>`;
         return;
       }
       itemsEl.innerHTML = state.items.map((it) => `
         <li data-id="${it.id}">
           <span class="dot" style="background:${colorOf(it.class_name)}"></span>
           ${it.display_name} — <strong>${(it.confidence * 100).toFixed(1)}%</strong>
-          <span class="boxconf">seg: ${it.located_as} ${(it.box_confidence * 100).toFixed(0)}% · ${Math.round(it.mask_area_px).toLocaleString()} px²</span>
+          <span class="boxconf">det: ${it.located_as} ${(it.box_confidence * 100).toFixed(0)}% · ${Math.round(it.box_area_px).toLocaleString()} px²</span>
           <span class="carbon">≈ ${it.estimated_carbon_kg} kg CO₂e</span>
         </li>`).join("");
 
       itemsEl.querySelectorAll("li[data-id]").forEach((li) => {
         const id = Number(li.dataset.id);
-        li.addEventListener("mouseenter", () => { hoveredId = id; drawMasks(); renderInspector(id); highlightListRow(); });
-        li.addEventListener("mouseleave", () => { hoveredId = null; drawMasks(); renderInspector(selectedId); highlightListRow(); });
+        li.addEventListener("mouseenter", () => { hoveredId = id; drawBoxes(); renderInspector(id); highlightListRow(); });
+        li.addEventListener("mouseleave", () => { hoveredId = null; drawBoxes(); renderInspector(selectedId); highlightListRow(); });
         li.addEventListener("click", () => {
           selectedId = (selectedId === id) ? null : id;
-          drawMasks(); renderInspector(selectedId !== null ? selectedId : id); highlightListRow();
+          drawBoxes(); renderInspector(selectedId !== null ? selectedId : id); highlightListRow();
         });
       });
     }

@@ -27,17 +27,18 @@ class BaseConfig:
     MAX_CONTENT_LENGTH = 10 * 1024 * 1024  # 10 MB max upload
     ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
 
-    # --- Model / inference (Dual-Tower Hybrid: waste YOLO-seg + TrashNet ViT) ---
-    # Stage 1 locator: a SPECIALIZED waste instance-segmentation model
-    # (YOLOv8-M-seg fine-tuned on TACO wild litter + TrashNet household
-    # recyclables; HF turhancan97/yolov8-segment-trash-detection). Its latent
-    # space only knows waste, so background objects are inherently ignored.
-    # The file auto-downloads from the HF Hub on first load if missing. Its 5
-    # coarse labels are diagnostics only (located_as) — the ViT decides
-    # material. Per-instance polygon masks drive the dynamic carbon scaling.
-    # For A/B baselines, a bare official Ultralytics name ("yolo26x-seg.pt")
-    # still works here.
-    MODEL_PATH = os.getenv("MODEL_PATH", os.path.join("models", "yolov8m-seg-trash.pt"))
+    # --- Model / inference (Dual-Tower Hybrid: waste YOLO detector + TrashNet ViT) ---
+    # Stage 1 locator: a SPECIALIZED waste OBJECT-DETECTION model (YOLOv8-N
+    # fine-tuned on a blended universal waste corpus of wild litter +
+    # household recyclables; GitHub gianlucasposito/YOLO-Waste-Detection, MIT).
+    # Its latent space only knows waste, so background objects rarely fire,
+    # and the nano backbone keeps edge latency minimal. The file auto-downloads
+    # on first load if missing. Its 5 coarse labels are diagnostics only
+    # (located_as) — the ViT decides material. The geometric BOX AREA drives
+    # the dynamic carbon scaling (gamma recalibrated in carbon_service).
+    # A/B alternatives that still resolve here: models/yolov8m-seg-trash.pt
+    # (v3.1 segmenter) or a bare official name like "yolo26x-seg.pt".
+    MODEL_PATH = os.getenv("MODEL_PATH", os.path.join("models", "yolov8n-waste-det.pt"))
     # Stage 2 material classifier: supervised ViT fine-tuned on TrashNet-enhanced
     # (Hugging Face model id; native labels map onto the 7-class taxonomy in
     # classification_service.py).
