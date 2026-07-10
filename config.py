@@ -86,6 +86,9 @@ class TestingConfig(BaseConfig):
     TESTING = True
     SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
     WTF_CSRF_ENABLED = False
+    # Tests must be hermetic: never inherit a real carbon key from .env.
+    # Tests that exercise the live path set this explicitly (with HTTP mocked).
+    CLIMATIQ_API_KEY = ""
 
 
 config_by_name = {

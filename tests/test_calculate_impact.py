@@ -107,6 +107,29 @@ def test_climatiq_http_error_becomes_clean_apierror(app, monkeypatch):
     assert "bad key" in str(exc.value.message)
 
 
+def test_climatiq_region_miss_falls_back_to_global_factor(app, monkeypatch):
+    # First call (region-scoped) has no published factor; the service retries
+    # without the region instead of failing the whole request.
+    calls = []
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        calls.append(json["emission_factor"].get("region"))
+        if json["emission_factor"].get("region"):
+            return _fake_response(400, {"message": "No emission factors could be found"})
+        return _fake_response(200, {"co2e": 1.9})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    with app.app_context():
+        app.config["CLIMATIQ_API_KEY"] = "test-key"
+        out = cs.calculate_impact([{"material": "paper", "weight_kg": 1.0}],
+                                  country="MY")
+
+    assert calls == ["MY", None]              # scoped attempt, then global retry
+    assert out["items"][0]["carbon_factor_kg_per_kg"] == 1.9
+    assert out["provider"] == "climatiq"
+
+
 def test_climatiq_timeout_becomes_clean_apierror(app, monkeypatch):
     def timeout_post(*a, **k):
         raise requests.exceptions.Timeout("upstream slow")

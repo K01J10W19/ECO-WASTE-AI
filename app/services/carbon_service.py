@@ -72,13 +72,15 @@ PIXEL_AREA_GAMMA = 8000.0
 CLIMATIQ_ESTIMATE_URL = "https://api.climatiq.io/data/v1/estimate"
 CLIMATIQ_DATA_VERSION = "^21"
 CLIMATIQ_TIMEOUT_S = 10
+# All seven ids verified LIVE against data_version ^21 (BEIS GB dataset,
+# landfill end-of-life) on 2026-07-10 with a real key — factors resolve.
 MATERIAL_TO_CLIMATIQ_ACTIVITY = {
-    "biodegradable": "waste-type_organic-disposal_method_landfill",
+    "biodegradable": "waste-type_organic_food_and_drink-disposal_method_landfill",
     "cardboard": "waste-type_cardboard-disposal_method_landfill",
     "glass": "waste-type_glass-disposal_method_landfill",
-    "metal": "waste-type_mixed_metals-disposal_method_landfill",
+    "metal": "waste-type_metals-disposal_method_landfill",
     "paper": "waste-type_paper-disposal_method_landfill",
-    "plastic": "waste-type_mixed_plastics-disposal_method_landfill",
+    "plastic": "waste-type_plastics-disposal_method_landfill",
     "general rubbish": "waste-type_household_residual_waste-disposal_method_landfill",
 }
 
@@ -131,6 +133,12 @@ def _fetch_climatiq_factor(material: str, country: str, api_key: str) -> float:
             detail = str(resp.json().get("message", ""))[:200]
         except Exception:  # noqa: BLE001 - body may not be JSON
             pass
+        # Region miss (e.g. no BEIS factor published for "MY"): fall back to
+        # the region-unscoped factor rather than failing the whole request.
+        if resp.status_code == 400 and country:
+            logger.warning("Climatiq has no '%s' factor for region %s; "
+                           "falling back to the global factor.", material, country)
+            return _fetch_climatiq_factor(material, "", api_key)
         raise ApiError(f"Climatiq rejected the request for '{material}' "
                        f"(HTTP {resp.status_code}). {detail}".strip(),
                        status_code=502)
