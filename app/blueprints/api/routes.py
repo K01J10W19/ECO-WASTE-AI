@@ -3,16 +3,19 @@ JSON API endpoints. These are thin controllers: they validate input,
 call a service, and return JSON. No business logic lives here.
 
 Endpoints:
-  POST /api/predict           -> two-stage analysis (YOLO-World locate + CLIP classify)
-  POST /api/calculate-impact  -> call carbon API for weighted items  (Step 5)
+  POST /api/predict           -> dual-tower analysis (waste detector + TrashNet ViT)
+  POST /api/calculate-impact  -> CO2e for user-weighted items (Climatiq or local fallback)
   POST /api/recommend         -> generate disposal recommendations  (Step 6)
 """
 import os
 import uuid
 
 from flask import Blueprint, current_app, jsonify, request
+from pydantic import ValidationError
 from werkzeug.utils import secure_filename
 
+from app.schemas.carbon import CalculateImpactRequest
+from app.services.carbon_service import calculate_impact as calculate_impact_service
 from app.services.detection_service import analyze_waste_pipeline
 from app.utils.errors import ApiError
 
@@ -75,7 +78,6 @@ def predict():
 
     detection = analyze_waste_pipeline(save_path, conf=_parse_conf(request.form.get("conf")))
 
-    # TODO (Step 5): persist a Scan row once carbon totals/location are available.
     return jsonify(
         items=detection["items"],
         image={
@@ -85,3 +87,32 @@ def predict():
             "url": f"/static/uploads/{filename}",
         },
     ), 200
+
+
+@api_bp.route("/calculate-impact", methods=["POST"])
+def calculate_impact():
+    """
+    Real CO2e for user-weighted items (Step 5).
+
+    Request : JSON { "items": [{"material": "plastic", "weight_kg": 0.5}, ...],
+                     "country": "MY" (optional ISO 3166-1 alpha-2) }
+    Response: { "items": [...], "total_co2e_kg", "country", "provider" }
+
+    Uses live Climatiq factors when CLIMATIQ_API_KEY is configured; falls back
+    to the local dummy coefficients otherwise (the app never requires a key).
+    """
+    payload = request.get_json(silent=True)
+    if payload is None:
+        raise ApiError("Request body must be JSON.", status_code=400)
+
+    try:
+        req = CalculateImpactRequest(**payload)
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        loc = ".".join(str(p) for p in first.get("loc", ()))
+        raise ApiError(f"Invalid request: {loc}: {first.get('msg', 'invalid')}",
+                       status_code=400)
+
+    result = calculate_impact_service(
+        [item.model_dump() for item in req.items], req.country)
+    return jsonify(result), 200

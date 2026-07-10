@@ -369,19 +369,32 @@ Rules:
 - **First-run downloads:** `models/yolov8n-waste-det.pt` (~6 MB, GitHub) + the
   TrashNet ViT (~343 MB, HF cache). Internet needed once.
 
-### Module 2 — Carbon Impact Estimation (External API + pixel-area scaling, NO ML)
-- **Current:** `carbon_service.DUMMY_CARBON_FACTORS` — placeholder per-kg CO2e base
-  coefficients for **all 7 materials** (biodegradable 0.57, cardboard 0.94, glass 0.85,
-  metal 4.50, paper 1.09, plastic 3.10, general rubbish 1.20), plus the **box-area
-  dynamic scaling**: `estimate_dynamic_impact(label, box_area_px)` = base ×
-  (area / γ), γ = `PIXEL_AREA_GAMMA` = 8000 (recalibrated for rectangular
-  over-coverage). Coefficients are order-of-magnitude realistic, clearly marked dummy.
-- **Step 5:** swap lookup internals for live Climatiq calls (material + user-entered
-  weight (kg) + ISO country code), async per item, aggregate total CO2e. Public
-  signatures (`get_carbon_factor`, `estimate_impact`, `estimate_dynamic_impact`)
-  must not change; the pixel-area proxy remains as the no-weight fallback.
-- Must handle: missing/invalid weight, unknown material mapping, API timeout/error,
-  missing API key — all as clean, user-facing errors via `ApiError`.
+### Module 2 — Carbon Impact Estimation (External API + box-area scaling, NO ML) — DONE (Step 5)
+- **Live path:** when `CLIMATIQ_API_KEY` is set, `carbon_service` fetches per-kg
+  emission factors from the Climatiq estimate endpoint
+  (`https://api.climatiq.io/data/v1/estimate`, bearer auth, 10 s timeout) —
+  one 1-kg probe per unique (material, country), `lru_cache`d for the process,
+  then weighted items scale locally. Materials map to activity ids via
+  `MATERIAL_TO_CLIMATIQ_ACTIVITY` (**operator note:** confirm/adjust ids in the
+  Climatiq Data Explorer for your data plan — a wrong id fails loudly with the
+  API's own message, never silently). Optional ISO 3166-1 alpha-2 `country`
+  scopes the factor region.
+- **Fallback path (always available):** blank key → `DUMMY_CARBON_FACTORS`
+  (biodegradable 0.57, cardboard 0.94, glass 0.85, metal 4.50, paper 1.09,
+  plastic 3.10, general rubbish 1.20). The app boots and all tests pass with
+  no key; every response labels its `source`/`provider`
+  (`climatiq` | `local_dummy` | `mixed`).
+- **Endpoint:** `POST /api/calculate-impact` — body
+  `{items:[{material, weight_kg}], country?}` validated by
+  `schemas/carbon.CalculateImpactRequest` (weights in (0, 1000] kg, ≤100 items);
+  returns per-item factors + `co2e_kg` and the aggregate `total_co2e_kg`.
+- **Box-area proxy (kept):** `estimate_dynamic_impact(label, box_area_px)` =
+  base × (area / γ), γ = 8000 — deliberately LOCAL-only so `/predict` never
+  blocks on the network; it remains the no-weight fallback in the detection
+  payload.
+- Error handling: invalid/missing weight and unknown material → 400; Climatiq
+  auth/timeout/network/shape problems → 502 with a user-facing message —
+  all via `ApiError`, nothing 500s silently.
 
 ### Module 3 — Recommendation System (rule-based core + optional LLM)
 - Input: the 7-class material verdicts + carbon values.
@@ -431,7 +444,7 @@ FLASK_ENV=development
 SECRET_KEY=<long random string; generate with: python -c "import secrets; print(secrets.token_hex(32))">
 
 CARBON_PROVIDER=climatiq          # or carbon_interface
-CLIMATIQ_API_KEY=<from climatiq.io dashboard — needed in Step 5>
+CLIMATIQ_API_KEY=<from climatiq.io dashboard — blank = local dummy factors>
 CARBON_INTERFACE_API_KEY=         # only if using that provider
 
 LLM_API_KEY=                      # OPTIONAL — leave blank for rule-based only
@@ -503,16 +516,17 @@ Each completed step gets its own commit + push — see §13 for the commit conve
 | 4.9 | DUAL-TOWER HYBRID: YOLO26-X-SEG instance segmentation + context-aware square padding + supervised TrashNet ViT replaces CLIP + pixel-area dynamic carbon scaling (γ=5000) + polygon-mask frontend | **DONE (locator superseded by 4.10)** |
 | 4.10 | SPECIALIST LOCATOR + METHOD B: blended TACO+TrashNet waste segmenter (yolov8m-seg-trash.pt) replaces COCO-80 Stage 1 + classical-CV Plasticity Index ψ tie-breaker | **DONE (locator superseded by 4.11)** |
 | 4.11 | **DETECTION REGRESSION: specialist waste OBJECT DETECTOR (yolov8n-waste-det.pt, blended corpus) replaces segmentation as Stage 1 — box-area carbon proxy with γ recalibrated 5000→8000, classic strokeRect frontend, cleaner background rejection, nano-speed edge throughput; Method B + ViT unchanged** | **DONE (this step)** |
-| 5 | Carbon module — real Climatiq calls in `carbon_service` + `POST /api/calculate-impact` | **Next** |
-| 6 | Recommendation module — rule-based + optional LLM enrichment | Pending |
+| 5 | **Carbon module — live Climatiq factors (cached 1-kg probes, region-scoped) with local-dummy fallback + `POST /api/calculate-impact` (pydantic-validated weights/country, per-item + total CO2e, provider labelling)** | **DONE (this step)** |
+| 6 | Recommendation module — rule-based + optional LLM enrichment | **Next** |
 | 7 | Frontend — full SPA: Tailwind/GSAP, weight forms, results dashboard | Pending |
 | 8 | Full test suite, gunicorn deployment guide, FYP documentation | Pending |
 
-**Deliverables checklist:** multi-object upload ✓ · auto instance masks + boxes ✓ ·
+**Deliverables checklist:** multi-object upload ✓ · auto bounding boxes ✓ ·
 per-item confidence (both towers) ✓ · per-item material evidence (ViT bars) ✓ ·
-size-aware carbon estimates (pixel-area scaling) ✓ · per-item weight inputs (Step 7) ·
-async real-time carbon API (Step 5) · total + per-item CO2e (Step 5/7) · structured
-disposal instructions (Step 6) · polished responsive UI (Step 7).
+size-aware carbon estimates (box-area scaling) ✓ · real-time carbon API with
+country scoping + fallback ✓ · total + per-item CO2e (API) ✓ · per-item weight
+inputs (Step 7 UI) · structured disposal instructions (Step 6) · polished
+responsive UI (Step 7).
 
 ---
 
