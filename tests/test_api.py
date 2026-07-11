@@ -10,3 +10,9 @@ def test_health(client):
 def test_index_page(client):
     res = client.get("/")
     assert res.status_code == 200
+
+
+def test_carbon_lab_page(client):
+    res = client.get("/carbon-lab")
+    assert res.status_code == 200
+    assert b"/api/recommend" in res.data

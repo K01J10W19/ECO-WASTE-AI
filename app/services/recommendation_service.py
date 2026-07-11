@@ -22,7 +22,9 @@ structured EXPERT KNOWLEDGE base (professional pros/cons per material+method)
 plus a rank-aware encouraging verdict, so the frontend receives prescriptive,
 auditable guidance — not just numbers.
 
-Weight resolution mirrors the dual-stage carbon UX:
+Weight resolution mirrors the dual-stage carbon UX (the SHARED
+``carbon_service.resolve_effective_weight`` helper — the same substitution
+``/api/calculate-impact`` applies):
   * ``weight_kg`` present  -> user-verified weight (the precision audit value);
   * else ``box_area_px``   -> the blind pixel proxy, box_area / gamma
     (the same PIXEL_AREA_GAMMA calibration the /predict payload uses).
@@ -39,9 +41,9 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 
 from app.services.carbon_service import (
-    PIXEL_AREA_GAMMA,
     estimate_disposal_impact,
     get_disposal_factor,
+    resolve_effective_weight,
 )
 from app.services.classification_service import DISPLAY_NAMES, MATERIAL_CLASSES
 from app.utils.errors import ApiError
@@ -318,33 +320,6 @@ def _build_verdict(rank: int, material: str, method: str,
             f"facilities allow.")
 
 
-def _resolve_weight(entry: dict) -> tuple:
-    """
-    (effective_weight_kg, weight_source) for one request item.
-
-    A user-verified ``weight_kg`` (the Stage-B audit value) always wins; a
-    ``box_area_px`` falls back to the blind pixel proxy, area / gamma — the
-    exact calibration the /predict payload already uses. At least one of the
-    two is required (the schema enforces this too; the service double-checks).
-    """
-    weight_kg = entry.get("weight_kg")
-    if weight_kg is not None:
-        weight_kg = float(weight_kg)
-        if weight_kg <= 0:
-            raise ApiError("Each item needs a positive weight_kg.", status_code=400)
-        return weight_kg, "user_weight"
-
-    box_area_px = entry.get("box_area_px")
-    if box_area_px is not None:
-        box_area_px = float(box_area_px)
-        if box_area_px <= 0:
-            raise ApiError("box_area_px must be positive.", status_code=400)
-        return box_area_px / PIXEL_AREA_GAMMA, "box_area_proxy"
-
-    raise ApiError("Each item needs weight_kg (user-verified) or box_area_px "
-                   "(the blind pixel proxy).", status_code=400)
-
-
 def simulate_disposal_paths(material: str, weight_kg: float, _pool=None) -> list:
     """
     Fork one item into its 3 taxonomy-branched end-of-life simulations,
@@ -444,7 +419,7 @@ def recommend_for_items(items: list) -> dict:
     with ThreadPoolExecutor(max_workers=_PARALLEL_PATHS) as pool:
         for entry in items:
             material = entry["material"]
-            weight_kg, weight_source = _resolve_weight(entry)
+            weight_kg, weight_source = resolve_effective_weight(entry)
             ranked = simulate_disposal_paths(material, weight_kg, _pool=pool)
 
             optimal_total += ranked[0]["carbon_impact_kg"]

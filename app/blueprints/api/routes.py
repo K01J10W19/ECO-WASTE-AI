@@ -108,11 +108,17 @@ def predict():
 @api_bp.route("/calculate-impact", methods=["POST"])
 def calculate_impact():
     """
-    Real CO2e for user-weighted items (Step 5).
+    Stage-B precision audit: real CO2e for verified items (Step 5, v3.5 UX).
 
-    Request : JSON { "items": [{"material": "plastic", "weight_kg": 0.5}, ...],
-                     "country": "MY" (optional ISO 3166-1 alpha-2) }
-    Response: { "items": [...], "total_co2e_kg", "country", "provider" }
+    Request : JSON { "items": [{"id": 0, "material": "plastic",
+                                "weight_kg": 0.5 | "box_area_px": 233712}, ...],
+                     "country": "MY" (optional ISO alpha-2 — typically the
+                     frontend's IP-geolocated default; blank = global) }
+              ``id`` is the client's grid row key (echoed back verbatim for
+              split-screen canvas↔grid sync); items without a weight fall
+              back to the box_area_px / gamma pixel proxy.
+    Response: { "items": [{id, material, weight_kg, weight_source, ...}],
+                "total_co2e_kg", "country", "provider" }
 
     Uses live Climatiq factors when CLIMATIQ_API_KEY is configured; falls back
     to the local dummy coefficients otherwise (the app never requires a key).

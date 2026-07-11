@@ -178,10 +178,14 @@ Upload (multipart image)
     the ψ physics readout + the carbon formula; raw JSON panel
 
 Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
-  → POST /api/calculate-impact  {items:[{material, weight_kg}], country?}
-      STAGE B precision audit — live Climatiq factor per unique
-      (material, country, api_key) via cached 1-kg probes, scaled locally;
-      blank key → dummy factors; provider labelled in the response
+  → POST /api/calculate-impact  {items:[{id?, material,
+                                 weight_kg? | box_area_px?}], country?}
+      STAGE B precision audit — client grid `id`s echoed back VERBATIM
+      (split-screen canvas↔grid bi-directional sync); missing weight →
+      box_area_px/γ pixel-proxy substitution (weight_source labelled);
+      live Climatiq factor per unique (material, country, api_key) via
+      cached 1-kg probes, scaled locally; blank key → dummy factors;
+      blank/omitted country → Climatiq global dataset
   → POST /api/recommend  {items:[{material, weight_kg? | box_area_px?}]}
       DECISION MAKING MODULE — forks each item into 3 taxonomy-branched
       end-of-life paths in parallel, ranks ascending CO2e (rank 1 = Optimal),
@@ -396,21 +400,40 @@ Rules:
   local dummies are bypassed: per-kg factors come live from the Climatiq
   estimate endpoint (`https://api.climatiq.io/data/v1/estimate`, bearer auth,
   10 s timeout) as 1-kg probes cached via **`lru_cache(maxsize=64)` on the
-  unique (material, country, api_key) tuple**; weight scaling then happens
-  locally, keeping upstream request density minimal (one call per unique
-  factor, not per item). Materials map to activity ids via
-  `MATERIAL_TO_CLIMATIQ_ACTIVITY` (**operator note:** confirm/adjust ids in the
-  Climatiq Data Explorer for your data plan — a wrong id fails loudly with the
-  API's own message, never silently). A region miss retries unscoped.
+  unique (material, country, api_key) tuple** (country upper-cased pre-cache);
+  weight scaling then happens locally, keeping upstream request density
+  minimal (one call per unique factor, not per item). Materials map to
+  activity ids via `MATERIAL_TO_CLIMATIQ_ACTIVITY` (**operator note:**
+  confirm/adjust ids in the Climatiq Data Explorer for your data plan — a
+  wrong id fails loudly with the API's own message, never silently). A region
+  miss retries unscoped.
+- **v3.5 UX mechanics (split-screen grid + geolocation):**
+  - *Item `id` echo:* each request item may carry the client's integer `id`
+    (the /predict item id keying the canvas box ↔ editable grid row); the
+    response echoes it back VERBATIM per item (never renumbered server-side)
+    so the frontend performs instant bi-directional focus tracking on weight
+    edits. Provided ids must be unique (schema-enforced 400 otherwise).
+  - *Pixel-proxy weight substitution:* `weight_kg` is now OPTIONAL — when
+    absent, `box_area_px / γ` (clamped geometric box area) becomes the
+    effective weight via the shared `carbon_service.resolve_effective_weight`
+    (the same helper the DMM uses); at least one size signal is required and
+    every response item labels `weight_source`
+    (`user_weight` | `box_area_proxy`) plus the effective `weight_kg` priced.
+  - *Graceful country defaulting:* `country` typically arrives as the
+    frontend's IP-geolocated default and region-scopes the live factors;
+    omitted, blank or whitespace values coerce to None → the region selector
+    is omitted entirely and Climatiq resolves against its global dataset.
 - **Fallback path (always available):** blank key → `DUMMY_CARBON_FACTORS`
   (biodegradable 0.57, cardboard 0.94, glass 0.85, metal 4.50, paper 1.09,
   plastic 3.10, general rubbish 1.20). The app boots and all tests pass with
   no key; every response labels its `source`/`provider`
   (`climatiq` | `local_dummy` | `mixed`).
-- **Endpoint contract:** body `{items:[{material, weight_kg}], country?}`
-  validated by `schemas/carbon.CalculateImpactRequest` (weights in (0, 1000] kg,
-  ≤100 items); returns per-item factors + `co2e_kg` and the aggregate
-  `total_co2e_kg`.
+- **Endpoint contract:** body
+  `{items:[{id?, material, weight_kg?, box_area_px?}], country?}` validated by
+  `schemas/carbon.CalculateImpactRequest` (weights in (0, 1000] kg, area ≤
+  1000·γ, ≤100 items, unique ids, ≥1 size signal per item); returns per-item
+  `{id, material, weight_kg (effective), weight_source,
+  carbon_factor_kg_per_kg, co2e_kg, source}` and the aggregate `total_co2e_kg`.
 - **Module 3 factor side:** `DISPOSAL_METHOD_FACTORS` (7 materials × 3 routes,
   NET kg CO2e/kg, credits negative) + `estimate_disposal_impact(material,
   method, weight_kg)` live here too — local-only, app-context-free, thread-safe
@@ -445,8 +468,10 @@ Rules:
   environmental_cons }`.
 - **Weight resolution (dual-stage aware):** a user-verified `weight_kg` (Stage B)
   always wins; otherwise `box_area_px / γ` (the Stage-A blind proxy — the same
-  calibration `/predict` uses). At least one is required; the payload labels
-  `weight_source` (`user_weight` | `box_area_proxy`).
+  calibration `/predict` uses), via the SHARED
+  `carbon_service.resolve_effective_weight` helper that
+  `/api/calculate-impact` also runs. At least one is required; the payload
+  labels `weight_source` (`user_weight` | `box_area_proxy`).
 - **Endpoint:** `POST /api/recommend` — body
   `{items:[{material, weight_kg?, box_area_px?}]}` validated by
   `schemas/recommendation.RecommendRequest` (≤100 items, weight (0, 1000] kg,
@@ -474,8 +499,13 @@ Rules:
   carbon formula readout (base × area ÷ γ); hovering or clicking any box (or list
   row) walks the other items. Raw JSON panel below. Vanilla HTML/CSS/JS, zero
   dependencies.
-- **Step 7:** the polished SPA — Tailwind layout, GSAP transitions, per-item weight
-  inputs + country selector, carbon dashboard, recommendation list.
+- **Step 7:** the polished SPA — Tailwind layout, GSAP transitions, and the
+  **split-screen interactive grid**: image bounding boxes linked 1:1 to an
+  editable item-list grid via the echoed item `id`s (bi-directional focus
+  tracking, no canvas-overlay editing), per-item weight inputs, a country
+  selector pre-populated by a lightweight IP-geolocation lookup at page init
+  (the geolocated code rides `country` into `/api/calculate-impact`), carbon
+  dashboard, DMM recommendation list.
 
 ---
 
@@ -726,6 +756,11 @@ retraining), whereas CLIP's was editable text.
   `DUMMY_CARBON_FACTORS`, `DISPOSAL_METHOD_FACTORS`, `DISPOSAL_PATHS` and
   `EXPERT_KNOWLEDGE` stay in **lockstep** (§5) — tests enforce full 7×3 coverage.
 - γ (`PIXEL_AREA_GAMMA` = 8000) is a code constant in `carbon_service.py`, not env.
+- The audit endpoint's item `id` is the CLIENT's grid row key: echo it back
+  verbatim (null when absent), never renumber, filter or reorder items
+  server-side — item order in == item order out. Weight substitution goes
+  through the shared `carbon_service.resolve_effective_weight` for BOTH
+  `/api/calculate-impact` and the DMM — never fork a second copy of that rule.
 - The **DMM is local + deterministic by design**: never add network calls, API
   keys, or Flask app-context dependence to `recommendation_service` or the
   disposal-factor lookups — live regional factors belong to

@@ -62,6 +62,44 @@ def test_calculate_impact_rejects_nonpositive_weight(app):
     assert exc.value.status_code == 400
 
 
+# --- v3.5 UX: id echo + pixel-proxy weight substitution ----------------------
+
+def test_calculate_impact_echoes_client_item_ids(app):
+    with app.app_context():
+        app.config["CLIMATIQ_API_KEY"] = ""
+        out = cs.calculate_impact(
+            [{"id": 7, "material": "plastic", "weight_kg": 1.0},
+             {"id": 3, "material": "glass", "weight_kg": 1.0},
+             {"material": "paper", "weight_kg": 1.0}])          # id optional
+
+    assert [i["id"] for i in out["items"]] == [7, 3, None]      # verbatim, in order
+    CalculateImpactResponse(**out)
+
+
+def test_calculate_impact_substitutes_box_area_when_weight_missing(app):
+    with app.app_context():
+        app.config["CLIMATIQ_API_KEY"] = ""
+        out = cs.calculate_impact(
+            [{"id": 0, "material": "plastic", "box_area_px": 16000.0},   # 2 kg proxy
+             {"id": 1, "material": "plastic", "weight_kg": 0.5,
+              "box_area_px": 999999.0}])                                 # weight wins
+
+    proxy, audited = out["items"]
+    assert proxy["weight_source"] == "box_area_proxy"
+    assert proxy["weight_kg"] == pytest.approx(2.0)              # 16000 / gamma
+    assert proxy["co2e_kg"] == pytest.approx(6.2)                # 3.10 * 2
+    assert audited["weight_source"] == "user_weight"
+    assert audited["weight_kg"] == pytest.approx(0.5)
+    CalculateImpactResponse(**out)
+
+
+def test_calculate_impact_requires_a_size_signal(app):
+    with app.app_context():
+        with pytest.raises(ApiError) as exc:
+            cs.calculate_impact([{"material": "metal"}])
+    assert exc.value.status_code == 400
+
+
 # --- service: live Climatiq path (mocked HTTP) -------------------------------
 
 def test_calculate_impact_uses_climatiq_when_key_present(app, monkeypatch):
@@ -179,9 +217,12 @@ def test_endpoint_rejects_bad_payloads(client):
         {"items": []},                                              # empty list
         {"items": [{"material": "plastic", "weight_kg": 0}]},       # weight <= 0
         {"items": [{"material": "plastic", "weight_kg": 2000}]},    # weight > cap
-        {"items": [{"material": "plastic"}]},                       # missing weight
+        {"items": [{"material": "plastic"}]},                       # no size signal
+        {"items": [{"material": "plastic", "box_area_px": -5}]},    # negative area
         {"items": [{"material": "plastic", "weight_kg": 1}],
          "country": "MYS"},                                          # bad ISO code
+        {"items": [{"id": 1, "material": "plastic", "weight_kg": 1},
+                   {"id": 1, "material": "glass", "weight_kg": 1}]},  # dup ids
     ]
     for payload in cases:
         res = client.post("/api/calculate-impact", json=payload)
@@ -190,3 +231,30 @@ def test_endpoint_rejects_bad_payloads(client):
     res = client.post("/api/calculate-impact",
                       json={"items": [{"material": "vibranium", "weight_kg": 1}]})
     assert res.status_code == 400   # unknown material from the service layer
+
+
+def test_endpoint_grid_sync_and_proxy_flow(client):
+    # The split-screen frontend posts /predict rows verbatim: id + box area,
+    # user-audited weights where edited. Ids come back untouched, in order.
+    res = client.post("/api/calculate-impact", json={
+        "items": [{"id": 4, "material": "plastic", "box_area_px": 233712},
+                  {"id": 2, "material": "paper", "weight_kg": 0.005}],
+    })
+    assert res.status_code == 200
+    body = res.get_json()
+    CalculateImpactResponse(**body)
+    assert [i["id"] for i in body["items"]] == [4, 2]
+    assert body["items"][0]["weight_source"] == "box_area_proxy"
+    assert body["items"][0]["weight_kg"] == pytest.approx(29.214)   # 233712 / 8000
+    assert body["items"][1]["weight_source"] == "user_weight"
+
+
+def test_endpoint_blank_country_defaults_to_global(client):
+    # An empty-string country (frontend geolocation lookup failed) must NOT
+    # 400 — it coerces to None and the factors stay region-unscoped.
+    res = client.post("/api/calculate-impact", json={
+        "items": [{"material": "glass", "weight_kg": 1.0}],
+        "country": "",
+    })
+    assert res.status_code == 200
+    assert res.get_json()["country"] is None

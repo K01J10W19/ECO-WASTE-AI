@@ -239,10 +239,15 @@ def get_carbon_factor(label: str) -> float:
 
 
 def _resolve_factor(label: str, country: str) -> tuple:
-    """(per-kg factor, source) — Climatiq when configured+mapped, else dummy."""
+    """(per-kg factor, source) — Climatiq when configured+mapped, else dummy.
+
+    ``country`` is normalised (upper-cased, '' when absent) BEFORE the cached
+    probe so "my" and "MY" share one cache slot; an empty value omits the
+    region selector entirely and Climatiq falls back to its global dataset.
+    """
     api_key = _climatiq_api_key()
     if api_key and label in MATERIAL_TO_CLIMATIQ_ACTIVITY:
-        return _fetch_climatiq_factor(label, country or "", api_key), "climatiq"
+        return _fetch_climatiq_factor(label, (country or "").upper(), api_key), "climatiq"
     return get_carbon_factor(label), "local_dummy"
 
 
@@ -275,6 +280,36 @@ def estimate_dynamic_impact(label: str, area_px: float) -> float:
     if area_px < 0:
         raise ValueError("area_px must be non-negative")
     return round(get_carbon_factor(label) * (area_px / PIXEL_AREA_GAMMA), 4)
+
+
+def resolve_effective_weight(entry: dict) -> tuple:
+    """
+    (effective_weight_kg, weight_source) for one request item — the dual-stage
+    weight substitution shared by ``/api/calculate-impact`` and the DMM.
+
+    A user-verified ``weight_kg`` (the Stage-B audit value) always wins; a
+    ``box_area_px`` falls back to the blind pixel proxy, clamped box area /
+    ``PIXEL_AREA_GAMMA`` — the exact calibration the /predict payload uses.
+    At least one of the two is required (schemas enforce this too; the
+    service double-checks). ``weight_source`` is ``"user_weight"`` or
+    ``"box_area_proxy"`` so every response stays honest about provenance.
+    """
+    weight_kg = entry.get("weight_kg")
+    if weight_kg is not None:
+        weight_kg = float(weight_kg)
+        if weight_kg <= 0:
+            raise ApiError("Each item needs a positive weight_kg.", status_code=400)
+        return weight_kg, "user_weight"
+
+    box_area_px = entry.get("box_area_px")
+    if box_area_px is not None:
+        box_area_px = float(box_area_px)
+        if box_area_px <= 0:
+            raise ApiError("box_area_px must be positive.", status_code=400)
+        return box_area_px / PIXEL_AREA_GAMMA, "box_area_proxy"
+
+    raise ApiError("Each item needs weight_kg (user-verified) or box_area_px "
+                   "(the blind pixel proxy).", status_code=400)
 
 
 def get_disposal_factor(material: str, method: str) -> float:
@@ -311,23 +346,29 @@ def estimate_disposal_impact(material: str, method: str, weight_kg: float) -> fl
 
 def calculate_impact(items: list, country: str = None) -> dict:
     """
-    Step-5 aggregate: real CO2e for user-weighted items (POST /api/calculate-impact).
+    Stage-B aggregate: real CO2e for verified items (POST /api/calculate-impact).
 
-    ``items`` is a list of ``{"material": str, "weight_kg": float}`` dicts
-    (already type-validated by the pydantic schema at the route). Returns::
+    ``items`` is a list of ``{"id": int?, "material": str, "weight_kg": float?,
+    "box_area_px": float?}`` dicts (already type-validated by the pydantic
+    schema at the route). Each item needs at least one size signal: a
+    user-verified ``weight_kg`` wins, otherwise ``box_area_px / gamma`` is the
+    blind pixel-proxy substitute (``resolve_effective_weight``). The optional
+    ``id`` is the client's grid/canvas row key — echoed back VERBATIM per item
+    so the split-screen UI can track edits bi-directionally. Returns::
 
         {
-          "items": [ { material, weight_kg, carbon_factor_kg_per_kg,
-                       co2e_kg, source } ],
+          "items": [ { id, material, weight_kg (effective), weight_source,
+                       carbon_factor_kg_per_kg, co2e_kg, source } ],
           "total_co2e_kg": 4.83,
           "country": "MY" | None,
-          "provider": "climatiq" | "local_dummy"
+          "provider": "climatiq" | "local_dummy" | "mixed"
         }
 
-    Unknown materials are a clean 400 (the frontend only ever submits the
-    7-class taxonomy). One factor fetch per unique material (cached), so a
-    20-item scan costs at most 7 upstream calls — effectively 'async enough'
-    for a single request/response cycle.
+    ``country`` may be omitted/blank (global factors) or an ISO alpha-2 code —
+    typically the frontend's IP-geolocated default — which region-scopes the
+    live factors. Unknown materials are a clean 400. One factor fetch per
+    unique (material, country) via the cache, so a 20-item scan costs at most
+    7 upstream calls.
     """
     from app.services.classification_service import MATERIAL_CLASSES
 
@@ -335,23 +376,23 @@ def calculate_impact(items: list, country: str = None) -> dict:
     sources = set()
     for entry in items:
         material = entry["material"]
-        weight_kg = float(entry["weight_kg"])
         if material not in MATERIAL_CLASSES:
             raise ApiError(
                 f"Unknown material '{material}'. Valid materials: "
                 f"{', '.join(MATERIAL_CLASSES)}.",
                 status_code=400,
             )
-        if weight_kg <= 0:
-            raise ApiError("Each item needs a positive weight_kg.", status_code=400)
+        weight_kg, weight_source = resolve_effective_weight(entry)
 
         factor, source = _resolve_factor(material, country)
         co2e = round(factor * weight_kg, 4)
         total += co2e
         sources.add(source)
         results.append({
+            "id": entry.get("id"),
             "material": material,
-            "weight_kg": weight_kg,
+            "weight_kg": round(weight_kg, 4),
+            "weight_source": weight_source,
             "carbon_factor_kg_per_kg": round(factor, 4),
             "co2e_kg": co2e,
             "source": source,

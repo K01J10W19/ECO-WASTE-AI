@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Carbon &amp; Decision Lab — Module 2 + Module 3 tester</title>
+  <style>
+    :root {
+      --bg:#0f172a; --card:#1e293b; --muted:#94a3b8; --fg:#e2e8f0; --accent:#38bdf8;
+      --ok:#34d399; --warn:#fbbf24; --bad:#f87171; --line:#24324a;
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+    .wrap { max-width: 1000px; margin: 0 auto; padding: 24px 16px 64px; }
+    h1 { font-size: 1.4rem; margin: 8px 0 2px; }
+    .sub { color: var(--muted); margin: 0 0 20px; font-size: .9rem; }
+    a { color: var(--accent); }
+
+    .card { background: var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:18px; }
+    .card h2 { margin:0 0 10px; font-size:1.02rem; }
+    .hint { color:#64748b; font-size:.78rem; }
+
+    /* Item builder */
+    table#items { width:100%; border-collapse:collapse; font-size:.88rem; }
+    #items th { text-align:left; color:var(--muted); font-weight:600; padding:4px 6px; font-size:.78rem; }
+    #items td { padding:4px 6px; }
+    #items select, #items input, #country {
+      width:100%; background:#0b1220; color:var(--fg); border:1px solid var(--line);
+      border-radius:8px; padding:7px 9px; font:inherit;
+    }
+    #items input:invalid { border-color: var(--bad); }
+    .rm { background:none; border:0; color:var(--bad); cursor:pointer; font-size:1rem; }
+
+    .controls { margin-top:12px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+    button.action {
+      background: var(--accent); color:#0b1220; border:0; border-radius:10px;
+      font:700 .9rem system-ui, sans-serif; padding:9px 18px; cursor:pointer;
+    }
+    button.secondary { background:#334155; color:var(--fg); }
+    button.action:disabled { opacity:.35; cursor:not-allowed; }
+    .country-box { display:flex; align-items:center; gap:6px; margin-left:auto; }
+    .country-box input { width:64px; text-transform:uppercase; }
+    #status { min-height:1.2em; margin:10px 0 0; font-size:.9rem; }
+    #status.error { color: var(--bad); }
+
+    /* Impact result table */
+    table.result { width:100%; border-collapse:collapse; font-size:.85rem; }
+    .result th { text-align:left; color:var(--muted); border-bottom:1px solid var(--line); padding:5px 6px; font-size:.76rem; }
+    .result td { padding:6px; border-bottom:1px solid #1a2740; font-variant-numeric: tabular-nums; }
+    .total-line { margin-top:10px; color:var(--ok); font-size:1rem; font-weight:700; }
+    .badge { display:inline-block; padding:2px 9px; border-radius:999px; font-size:.72rem; font-weight:700; }
+    .badge.provider { background:#0b1220; color:var(--accent); border:1px solid var(--line); }
+    .badge.src { background:#0b1220; color:var(--muted); border:1px solid var(--line); }
+
+    /* Recommendation cards */
+    .rec-item { border-top:1px solid var(--line); padding-top:12px; margin-top:12px; }
+    .rec-item:first-of-type { border-top:0; margin-top:0; padding-top:0; }
+    .rec-head { display:flex; flex-wrap:wrap; gap:8px; align-items:baseline; margin-bottom:8px; }
+    .rec-head strong { font-size:1rem; }
+    .paths { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:10px; }
+    .path { border:1px solid var(--line); border-left-width:4px; border-radius:10px; padding:10px 12px; background:#16223a; }
+    .path.Optimal    { border-left-color: var(--ok); }
+    .path.Acceptable { border-left-color: var(--warn); }
+    .path.Warning    { border-left-color: var(--bad); }
+    .path .tag { font-size:.72rem; font-weight:800; letter-spacing:.04em; text-transform:uppercase; }
+    .path.Optimal .tag    { color: var(--ok); }
+    .path.Acceptable .tag { color: var(--warn); }
+    .path.Warning .tag    { color: var(--bad); }
+    .path h3 { margin:2px 0 4px; font-size:.95rem; }
+    .path .co2e { font-variant-numeric: tabular-nums; font-weight:700; }
+    .path .co2e.offset { color: var(--ok); }
+    .path .verdict { font-size:.82rem; margin:8px 0; color:var(--fg); }
+    .path details { font-size:.78rem; color:var(--muted); margin-top:6px; }
+    .path summary { cursor:pointer; color:var(--accent); }
+    .path .pros b { color:var(--ok); } .path .cons b { color:var(--bad); }
+    .summary-strip { margin-top:14px; padding-top:10px; border-top:1px solid var(--line); font-size:.88rem; display:flex; gap:18px; flex-wrap:wrap; }
+    .summary-strip span b { font-variant-numeric: tabular-nums; }
+
+    /* Raw JSON */
+    pre { background:#0b1220; border:1px solid var(--line); border-radius:10px; padding:12px;
+          font:.76rem/1.5 ui-monospace, Consolas, monospace; color:#a5f3fc; overflow:auto; max-height:340px; margin:8px 0 0; }
+    .json-label { color:var(--muted); font-size:.78rem; margin-top:10px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Carbon &amp; Decision Lab</h1>
+  <p class="sub">Manual tester for <b>Module 2</b> (<code>POST /api/calculate-impact</code> — Stage-B precision audit)
+    and <b>Module 3</b> (<code>POST /api/recommend</code> — the Decision Making Module).
+    Paste values from a <a href="/">Test Brain</a> scan (material + box area) or enter real weights, then fire either endpoint
+    and inspect the exact request/response JSON. &larr; back to the <a href="/">detector page</a>.</p>
+
+  <!-- ============ item builder ============ -->
+  <div class="card">
+    <h2>Items</h2>
+    <table id="items">
+      <thead>
+        <tr>
+          <th style="width:26%">material</th>
+          <th style="width:24%">weight_kg <span class="hint">(audited — wins)</span></th>
+          <th style="width:24%">box_area_px <span class="hint">(blind proxy)</span></th>
+          <th style="width:20%">effective weight</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div class="controls">
+      <button class="action secondary" id="add">+ add item</button>
+      <button class="action" id="impact">POST /api/calculate-impact</button>
+      <button class="action" id="recommend">POST /api/recommend</button>
+      <div class="country-box">
+        <label class="hint" for="country">country (impact only)</label>
+        <input id="country" maxlength="2" placeholder="MY" />
+      </div>
+    </div>
+    <p class="hint">gamma = 8000 px/kg. BOTH endpoints accept <code>weight_kg</code> (audited — always wins) and/or
+      <code>box_area_px</code>: the backend substitutes <code>area / γ</code> when no weight is given and labels
+      <code>weight_source</code>. Each row also carries a grid <code>id</code> which /calculate-impact echoes back
+      verbatim (split-screen canvas ↔ grid sync).</p>
+    <p id="status"></p>
+  </div>
+
+  <!-- ============ Module 2 result ============ -->
+  <div class="card" id="impact-card" style="display:none">
+    <h2>Module 2 — Carbon Impact (precision audit) <span class="badge provider" id="impact-provider"></span></h2>
+    <div id="impact-out"></div>
+    <div class="json-label">request sent</div><pre id="impact-req"></pre>
+    <div class="json-label">response</div><pre id="impact-res"></pre>
+  </div>
+
+  <!-- ============ Module 3 result ============ -->
+  <div class="card" id="rec-card" style="display:none">
+    <h2>Module 3 — Decision Making Module (ranked end-of-life paths)</h2>
+    <div id="rec-out"></div>
+    <div class="json-label">request sent</div><pre id="rec-req"></pre>
+    <div class="json-label">response</div><pre id="rec-res"></pre>
+  </div>
+</div>
+
+<script>
+"use strict";
+const GAMMA = 8000.0;   // display mirror of carbon_service.PIXEL_AREA_GAMMA
+const MATERIALS = ["plastic", "glass", "metal", "cardboard", "paper",
+                   "biodegradable", "general rubbish"];
+const $ = (sel) => document.querySelector(sel);
+const tbody = $("#items tbody");
+const esc = (s) => String(s).replace(/[&<>"']/g,
+  (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = (n) => Number(n.toFixed(4)).toString();
+
+/* ---------- item rows ---------- */
+function addRow(material, weight, area) {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td><select>${MATERIALS.map(m =>
+      `<option ${m === material ? "selected" : ""}>${m}</option>`).join("")}</select></td>
+    <td><input type="number" class="w" min="0" step="any" placeholder="e.g. 0.016"
+               value="${weight ?? ""}"></td>
+    <td><input type="number" class="a" min="0" step="any" placeholder="e.g. 233712"
+               value="${area ?? ""}"></td>
+    <td class="eff hint">—</td>
+    <td><button class="rm" title="remove">✕</button></td>`;
+  tr.querySelector(".rm").onclick = () => { tr.remove(); refresh(); };
+  tr.querySelectorAll("input").forEach(i => i.addEventListener("input", refresh));
+  tbody.appendChild(tr);
+  refresh();
+}
+
+function rows() {
+  return [...tbody.rows].map(tr => {
+    const weight = parseFloat(tr.querySelector(".w").value);
+    const area = parseFloat(tr.querySelector(".a").value);
+    return {
+      material: tr.querySelector("select").value,
+      weight_kg: Number.isFinite(weight) && weight > 0 ? weight : null,
+      box_area_px: Number.isFinite(area) && area > 0 ? area : null,
+      _tr: tr,
+    };
+  });
+}
+
+function refresh() {
+  rows().forEach(r => {
+    const eff = r.weight_kg ?? (r.box_area_px ? r.box_area_px / GAMMA : null);
+    r._tr.querySelector(".eff").textContent = eff === null ? "—"
+      : `${fmt(eff)} kg ${r.weight_kg ? "(audited)" : "(area/γ proxy)"}`;
+  });
+}
+
+function status(msg, isError) {
+  const el = $("#status");
+  el.textContent = msg || "";
+  el.className = isError ? "error" : "";
+}
+
+/* ---------- shared POST helper ---------- */
+async function post(url, body, reqPre, resPre) {
+  reqPre.textContent = JSON.stringify(body, null, 2);
+  status(`calling ${url} …`);
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  resPre.textContent = JSON.stringify(data, null, 2);
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  status(`${url} → HTTP ${res.status} OK`);
+  return data;
+}
+
+/* ---------- Module 2: /api/calculate-impact ---------- */
+$("#impact").onclick = async () => {
+  try {
+    const items = rows().map((r, idx) => {
+      const item = { id: idx, material: r.material };
+      if (r.weight_kg !== null) item.weight_kg = r.weight_kg;
+      if (r.box_area_px !== null) item.box_area_px = r.box_area_px;
+      if (r.weight_kg === null && r.box_area_px === null)
+        throw new Error("every row needs weight_kg or box_area_px");
+      return item;
+    });
+    if (!items.length) throw new Error("add at least one item");
+    const body = { items };
+    const country = $("#country").value.trim();
+    if (country) body.country = country;
+
+    const card = $("#impact-card"); card.style.display = "block";
+    const data = await post("/api/calculate-impact", body, $("#impact-req"), $("#impact-res"));
+
+    $("#impact-provider").textContent = `provider: ${data.provider}`;
+    $("#impact-out").innerHTML = `
+      <table class="result">
+        <tr><th>id</th><th>material</th><th>effective kg</th><th>weight_source</th>
+            <th>factor kg/kg</th><th>co2e_kg</th><th>source</th></tr>
+        ${data.items.map(i => `<tr>
+          <td>${i.id ?? "—"}</td><td>${esc(i.material)}</td><td>${fmt(i.weight_kg)}</td>
+          <td><span class="badge src">${esc(i.weight_source)}</span></td>
+          <td>${fmt(i.carbon_factor_kg_per_kg)}</td><td>${fmt(i.co2e_kg)}</td>
+          <td><span class="badge src">${esc(i.source)}</span></td></tr>`).join("")}
+      </table>
+      <p class="total-line">total: ${fmt(data.total_co2e_kg)} kg CO2e
+        ${data.country ? `<span class="badge src">region ${esc(data.country)}</span>` : ""}</p>`;
+  } catch (err) { status(err.message, true); }
+};
+
+/* ---------- Module 3: /api/recommend ---------- */
+$("#recommend").onclick = async () => {
+  try {
+    const items = rows().map(r => {
+      const item = { material: r.material };
+      if (r.weight_kg !== null) item.weight_kg = r.weight_kg;
+      if (r.box_area_px !== null) item.box_area_px = r.box_area_px;
+      if (r.weight_kg === null && r.box_area_px === null)
+        throw new Error("every row needs weight_kg or box_area_px");
+      return item;
+    });
+    if (!items.length) throw new Error("add at least one item");
+
+    const card = $("#rec-card"); card.style.display = "block";
+    const data = await post("/api/recommend", { items }, $("#rec-req"), $("#rec-res"));
+
+    $("#rec-out").innerHTML = data.items.map(item => `
+      <div class="rec-item">
+        <div class="rec-head">
+          <strong>${esc(item.display_name)}</strong>
+          <span class="badge src">${fmt(item.effective_weight_kg)} kg · ${esc(item.weight_source)}</span>
+          <span class="hint">best: <b>${esc(item.best_method)}</b> ·
+            picking rank&nbsp;1 over rank&nbsp;3 saves <b>${fmt(item.max_saving_kg)} kg CO2e</b></span>
+        </div>
+        <div class="paths">
+          ${item.recommendations.map(p => `
+            <div class="path ${esc(p.status_tag)}">
+              <span class="tag">#${p.rank} · ${esc(p.status_tag)}</span>
+              <h3>${esc(p.method_display)}</h3>
+              <div class="co2e ${p.carbon_impact_kg < 0 ? "offset" : ""}">
+                ${fmt(p.carbon_impact_kg)} kg CO2e
+                ${p.carbon_impact_kg < 0 ? " (net offset)" : ""}
+                <span class="hint">· factor ${fmt(p.carbon_factor_kg_per_kg)} kg/kg</span>
+              </div>
+              <p class="verdict">${esc(p.encouraging_verdict)}</p>
+              <details><summary>pros / cons</summary>
+                <p class="pros"><b>pros:</b> ${esc(p.environmental_pros)}</p>
+                <p class="cons"><b>cons:</b> ${esc(p.environmental_cons)}</p>
+              </details>
+            </div>`).join("")}
+        </div>
+      </div>`).join("") + `
+      <div class="summary-strip">
+        <span>items: <b>${data.summary.item_count}</b></span>
+        <span>all rank-1 paths: <b>${fmt(data.summary.optimal_total_co2e_kg)} kg</b></span>
+        <span>all rank-3 paths: <b>${fmt(data.summary.worst_total_co2e_kg)} kg</b></span>
+        <span style="color:var(--ok)">max saving: <b>${fmt(data.summary.max_saving_kg)} kg CO2e</b></span>
+      </div>`;
+  } catch (err) { status(err.message, true); }
+};
+
+/* ---------- boot: prefill with the iced-americano scan ---------- */
+$("#add").onclick = () => addRow("plastic", null, null);
+addRow("plastic", null, 233712);   // the cup from the Test Brain screenshot (blind proxy)
+addRow("plastic", 0.016, null);    // the SAME cup with a real audited weight (~16 g)
+addRow("paper", 0.005, null);      // the napkin, audited
+</script>
+</body>
+</html>
