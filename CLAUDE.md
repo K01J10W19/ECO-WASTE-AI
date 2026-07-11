@@ -13,7 +13,7 @@
 
 **Type:** Final Year Project (FYP). Code must be production-ready, modular, well-documented, and easy for an academic examiner to audit.
 
-**One-line description:** A web app where a user uploads a real-world image containing one or more waste items; a **100% local Dual-Tower Hybrid pipeline** — a **specialized waste object detector** (YOLOv8-N fine-tuned on a blended universal waste corpus of wild litter + household recyclables) boxes ONLY trash-like objects, a context-aware square-padding layer normalizes each crop, a **classical-CV physics extractor** (Method B: Laplacian wrinkles + Canny edges → Plasticity Index ψ) profiles each patch, and a TrashNet-fine-tuned Vision Transformer names the material (7-class taxonomy, with ψ breaking ambiguous plastic-vs-glass calls) — identifies every item; each item's carbon footprint is **dynamically scaled by its bounding box's geometric pixel area** (placeholder coefficients now, real-time Climatiq API with user-entered weights in Step 5); and it returns tailored recycling/disposal recommendations per item.
+**One-line description:** A web app where a user uploads a real-world image containing one or more waste items; a **100% local Dual-Tower Hybrid pipeline** — a **specialized waste object detector** (YOLOv8-N fine-tuned on a blended universal waste corpus of wild litter + household recyclables) boxes ONLY trash-like objects, a context-aware square-padding layer normalizes each crop, a **classical-CV physics extractor** (Method B: Laplacian wrinkles + Canny edges → Plasticity Index ψ) profiles each patch, and a TrashNet-fine-tuned Vision Transformer names the material (7-class taxonomy, with ψ breaking ambiguous plastic-vs-glass calls) — identifies every item; carbon flows through a **dual-stage UX** — a blind, offline estimate **dynamically scaled by each bounding box's geometric pixel area** at upload, then a precision audit of user-verified weights priced by the **real-time Climatiq API** (country-scoped, cached, local-dummy fallback); and a **Decision Making Module (DMM)** forks every item into **3 parallel end-of-life simulations**, ranks them by ascending CO2e, and returns structured, expert-annotated disposal prescriptions per item.
 
 **Author's environment:** Windows 11, PowerShell, local GPU = **NVIDIA GTX 1650 (4 GB VRAM)**. All ML choices must respect this 4 GB limit (inference of both towers fits; only *training* ever exceeded it, and training is retired).
 
@@ -23,7 +23,9 @@
 
 The project went through several pivots (custom training → single-stage YOLO-World →
 two-stage with abstract anchors → two-stage vanilla YOLOv8 → two-stage RT-DETR-X →
-COCO-80 YOLO26-seg → blended-waste segmenter → **this, v3.2**). The paradigm is
+COCO-80 YOLO26-seg → blended-waste segmenter → box-detector regression (v3.2) →
+**this, v3.5**: the v3.2 towers unchanged, now orchestrating a dual-stage carbon
+UX (Module 2) and the Decision Making Module (Module 3) downstream). The paradigm is
 **edge-native and 100% local**: two frozen local models plus a classical-CV layer,
 no cloud inference. Localization and classification are **decoupled**, and each tower
 plays its architectural strength — **CNN spatial localization for WHERE, ViT global
@@ -174,6 +176,16 @@ Upload (multipart image)
     interior tint, rectangular hit-testing, smallest box wins on overlap);
     hover/click a box (or list row) → inspector with the ViT score bars +
     the ψ physics readout + the carbon formula; raw JSON panel
+
+Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
+  → POST /api/calculate-impact  {items:[{material, weight_kg}], country?}
+      STAGE B precision audit — live Climatiq factor per unique
+      (material, country, api_key) via cached 1-kg probes, scaled locally;
+      blank key → dummy factors; provider labelled in the response
+  → POST /api/recommend  {items:[{material, weight_kg? | box_area_px?}]}
+      DECISION MAKING MODULE — forks each item into 3 taxonomy-branched
+      end-of-life paths in parallel, ranks ascending CO2e (rank 1 = Optimal),
+      returns status tags + rank-aware verdicts + expert pros/cons per path
 ```
 
 **Hard rules:**
@@ -207,8 +219,9 @@ Upload (multipart image)
 | Label mapping | model `trash` → system `general rubbish`; all other labels identity | `MODEL_LABEL_TO_MATERIAL` in classification_service; tests enforce full coverage. |
 | Stage 1 tuning | `conf=0.15` default (per-request override) — **the only knob; NMS-free** | Recall-first; Stage 2 carries per-item certainty. |
 | Carbon scaling | `estimated_carbon_kg = base x (box_area_px / γ)`, **γ = 8000** (recalibrated from 5000 for rectangular over-coverage, fill factor ~0.6) | Box area as volume/mass proxy until Step 5's real weights. |
-| Carbon provider | **Climatiq** (Step 5). Until then: **dummy per-kg coefficients** in `carbon_service.py` keyed on the 7 materials | Keeps the JSON contract flowing end-to-end today; Step 5 swaps internals only. |
-| Recommendation engine | **Rule-based core + OPTIONAL LLM enrichment** | Deterministic engine is the gradeable default; LLM activates only when an API key is present. Must work fully with no LLM key. |
+| Carbon provider | **Climatiq** (live, Step 5) with the **dummy per-kg coefficients** in `carbon_service.py` as the ever-present blank-key fallback | Dual-stage UX: blind local proxy at upload, audited live factors on user verification; the app never requires a key. |
+| Disposal-path matrix (DMM) | `carbon_service.DISPOSAL_METHOD_FACTORS` — 7 materials × 3 routes of NET kg CO2e/kg code constants; **credits are NEGATIVE** (offsets) | Deterministic, offline, auditable (every factor echoed in the payload); the ranking must never block on the network — live regional factors stay Module 2's audit concern. |
+| Recommendation engine | **Decision Making Module (DMM)** — rule-based 3-path parallel carbon simulation + ascending-CO2e ranking + structured expert knowledge base (`recommendation_service.py`); LLM enrichment remains an OPTIONAL future hook | Deterministic engine is the gradeable default; must work fully with no LLM key. |
 | Backend | **Flask** (app factory + blueprints + services) | Thin controllers, logic in services. |
 | Frontend | HTML5 + Tailwind CSS + native JS (ES6+, Fetch API) + GSAP | SPA. Current interim page is a vanilla "Test Brain" tester with a classic bounding-box overlay + inspector; polished UI is Step 7. |
 | Database | SQLite (optional, for scan history) | Lightweight, local, file-based. |
@@ -257,10 +270,10 @@ waste-detection-app/
 │   ├── services/
 │   │   ├── detection_service.py        # ORCHESTRATOR: Stage 1 segment + padding layer + compose
 │   │   ├── classification_service.py   # Stage 2: TrashNet ViT material classifier
-│   │   ├── carbon_service.py           # base coefficients + pixel-area dynamic scaling (γ)
-│   │   └── recommendation_service.py   # rule-based + optional LLM (Step 6)
+│   │   ├── carbon_service.py           # dual-stage carbon engine: γ proxy + Climatiq audit + disposal matrix
+│   │   └── recommendation_service.py   # Module 3 DMM: 3-path simulation + ranking + knowledge base
 │   ├── models/scan.py     # SQLite model for optional scan history
-│   ├── schemas/           # pydantic validation models (JSON contract incl. box_area/physics)
+│   ├── schemas/           # pydantic contracts: detection.py, carbon.py, recommendation.py
 │   ├── utils/errors.py    # ApiError + register_error_handlers()
 │   ├── static/            # css/ js/ uploads/
 │   └── templates/index.html   # "Test Brain" tester page (full SPA in Step 7)
@@ -269,7 +282,7 @@ waste-detection-app/
 ├── tests/
 │   ├── conftest.py       # pytest fixtures (app, client)
 │   ├── test_api.py  test_detection.py  test_classification.py  test_carbon.py
-│   ├── test_predict_endpoint.py
+│   ├── test_predict_endpoint.py  test_calculate_impact.py  test_recommendation.py
 │   └── test_prepare_dataset.py  test_restratify_dataset.py  test_train.py   # legacy, keep green
 └── docs/                 # FYP report material
 ```
@@ -321,9 +334,11 @@ plastic, trash`) resolve onto it through `MODEL_LABEL_TO_MATERIAL`:
 
 Rules:
 - The raw material string is the **system-wide join key**: `DISPLAY_NAMES` (UI),
-  `carbon_service.DUMMY_CARBON_FACTORS`, and (Step 6) recommendation rules are keyed
-  on it. `tests/test_detection.py::test_taxonomy_lockstep` +
-  `tests/test_classification.py::test_every_native_vit_label_lands_in_the_taxonomy`
+  `carbon_service.DUMMY_CARBON_FACTORS` + `DISPOSAL_METHOD_FACTORS`, and the DMM's
+  `DISPOSAL_PATHS` / `EXPERT_KNOWLEDGE` are all keyed on it.
+  `tests/test_detection.py::test_taxonomy_lockstep` +
+  `tests/test_classification.py::test_every_native_vit_label_lands_in_the_taxonomy` +
+  `tests/test_recommendation.py::test_factor_matrix_and_knowledge_base_cover_every_path`
   enforce alignment — when anything changes, update all of them together.
 - `"general rubbish"` is the catch-all verdict — it must always exist and always have
   a carbon coefficient.
@@ -369,38 +384,82 @@ Rules:
 - **First-run downloads:** `models/yolov8n-waste-det.pt` (~6 MB, GitHub) + the
   TrashNet ViT (~343 MB, HF cache). Internet needed once.
 
-### Module 2 — Carbon Impact Estimation (External API + box-area scaling, NO ML) — DONE (Step 5)
-- **Live path:** when `CLIMATIQ_API_KEY` is set, `carbon_service` fetches per-kg
-  emission factors from the Climatiq estimate endpoint
-  (`https://api.climatiq.io/data/v1/estimate`, bearer auth, 10 s timeout) —
-  one 1-kg probe per unique (material, country), `lru_cache`d for the process,
-  then weighted items scale locally. Materials map to activity ids via
+### Module 2 — Carbon Impact Estimation (dual-stage UX, External API + box-area scaling, NO ML) — DONE (Step 5, dual-stage locked in v3.5)
+- **STAGE A — blind estimate (photo upload, offline-safe):** the instant a photo
+  is analysed, `estimate_dynamic_impact(label, box_area_px)` prices every
+  instance locally: base local factor × (clamped box area / γ), γ = 8000 —
+  deliberately LOCAL-only and deterministic so `/predict` never blocks on the
+  network; it is the no-weight proxy in the detection payload.
+- **STAGE B — precision audit (user verification + country alignment):**
+  `POST /api/calculate-impact` accepts user-corrected real weights (kg) and an
+  optional ISO 3166-1 alpha-2 `country`. When `CLIMATIQ_API_KEY` is set the
+  local dummies are bypassed: per-kg factors come live from the Climatiq
+  estimate endpoint (`https://api.climatiq.io/data/v1/estimate`, bearer auth,
+  10 s timeout) as 1-kg probes cached via **`lru_cache(maxsize=64)` on the
+  unique (material, country, api_key) tuple**; weight scaling then happens
+  locally, keeping upstream request density minimal (one call per unique
+  factor, not per item). Materials map to activity ids via
   `MATERIAL_TO_CLIMATIQ_ACTIVITY` (**operator note:** confirm/adjust ids in the
   Climatiq Data Explorer for your data plan — a wrong id fails loudly with the
-  API's own message, never silently). Optional ISO 3166-1 alpha-2 `country`
-  scopes the factor region.
+  API's own message, never silently). A region miss retries unscoped.
 - **Fallback path (always available):** blank key → `DUMMY_CARBON_FACTORS`
   (biodegradable 0.57, cardboard 0.94, glass 0.85, metal 4.50, paper 1.09,
   plastic 3.10, general rubbish 1.20). The app boots and all tests pass with
   no key; every response labels its `source`/`provider`
   (`climatiq` | `local_dummy` | `mixed`).
-- **Endpoint:** `POST /api/calculate-impact` — body
-  `{items:[{material, weight_kg}], country?}` validated by
-  `schemas/carbon.CalculateImpactRequest` (weights in (0, 1000] kg, ≤100 items);
-  returns per-item factors + `co2e_kg` and the aggregate `total_co2e_kg`.
-- **Box-area proxy (kept):** `estimate_dynamic_impact(label, box_area_px)` =
-  base × (area / γ), γ = 8000 — deliberately LOCAL-only so `/predict` never
-  blocks on the network; it remains the no-weight fallback in the detection
-  payload.
+- **Endpoint contract:** body `{items:[{material, weight_kg}], country?}`
+  validated by `schemas/carbon.CalculateImpactRequest` (weights in (0, 1000] kg,
+  ≤100 items); returns per-item factors + `co2e_kg` and the aggregate
+  `total_co2e_kg`.
+- **Module 3 factor side:** `DISPOSAL_METHOD_FACTORS` (7 materials × 3 routes,
+  NET kg CO2e/kg, credits negative) + `estimate_disposal_impact(material,
+  method, weight_kg)` live here too — local-only, app-context-free, thread-safe
+  (the DMM fans them out in parallel).
 - Error handling: invalid/missing weight and unknown material → 400; Climatiq
   auth/timeout/network/shape problems → 502 with a user-facing message —
-  all via `ApiError`, nothing 500s silently.
+  all via `ApiError`, nothing 500s silently (no naked stack traces).
 
-### Module 3 — Recommendation System (rule-based core + optional LLM)
-- Input: the 7-class material verdicts + carbon values.
-- **Default path:** deterministic rule-based engine — modular mapping from material →
-  structured disposal guidance. **Optional path:** LLM enrichment when `LLM_API_KEY`
-  is set; MUST degrade gracefully to rule-based output otherwise.
+### Module 3 — Recommendation System: the DECISION MAKING MODULE (DMM) — DONE (Step 6)
+- **Goal:** convert the carbon engine's quantitative data into qualitative,
+  ORDERED prescriptions — not one default disposal answer but a ranked
+  comparison of realistic end-of-life choices, with expert commentary.
+- **Multi-path parallel carbon simulation:** each incoming item forks into
+  **3 end-of-life simulations evaluated in parallel**
+  (`ThreadPoolExecutor(max_workers=3)` fan-out onto the carbon engine),
+  branched by taxonomy:
+  - dry recyclables (`plastic, glass, metal, cardboard, paper`) →
+    `recycling | incineration | landfill`
+  - organics (`biodegradable`) → `composting | anaerobic_digestion | landfill`
+  - residual (`general rubbish`) → `material_recovery | incineration | landfill`
+- **Sorting engine & ranking core:** the 3 CO2e outputs are sorted **ascending**
+  (lowest footprint / deepest negative offset wins; ties fall back to method
+  name so ranking is fully deterministic): Rank 1 = Optimal green path,
+  Rank 2 = Acceptable, Rank 3 = Warning (worst-case baseline).
+- **Structured expert knowledge base:** `EXPERT_KNOWLEDGE` (7×3 matrix) attaches
+  professional `environmental_pros` / `environmental_cons` to every path;
+  the `encouraging_verdict` is composed at runtime from the SORTED outcome
+  (rank + display names + kg CO2e saved/added), so recalibrated factors can
+  reshuffle ranks without the copy drifting. Per-path payload:
+  `{ method, method_display, rank, status_tag, carbon_factor_kg_per_kg,
+  carbon_impact_kg, encouraging_verdict, environmental_pros,
+  environmental_cons }`.
+- **Weight resolution (dual-stage aware):** a user-verified `weight_kg` (Stage B)
+  always wins; otherwise `box_area_px / γ` (the Stage-A blind proxy — the same
+  calibration `/predict` uses). At least one is required; the payload labels
+  `weight_source` (`user_weight` | `box_area_proxy`).
+- **Endpoint:** `POST /api/recommend` — body
+  `{items:[{material, weight_kg?, box_area_px?}]}` validated by
+  `schemas/recommendation.RecommendRequest` (≤100 items, weight (0, 1000] kg,
+  area ≤ 1000·γ); returns per-item ranked `recommendations[3]` + `best_method`
+  + `max_saving_kg`, an aggregate `summary` (optimal-vs-worst totals — may be
+  negative thanks to offsets) and `provider: "local_knowledge_base"`.
+- **Deliberately 100% local & deterministic:** no network, no API key, no app
+  context (thread-pool safe) — live regional factors remain Module 2's audit
+  concern. Honest GHG-only lens: inert landfilled plastic out-scores
+  incineration on pure CO2e (rank 2), and the cons text carries the 400-year
+  microplastic caveat the number cannot see (report talking point).
+- **Optional LLM enrichment:** still a future hook (`LLM_API_KEY` reserved);
+  the DMM core MUST keep working with no LLM key.
 
 ### Module 4 — Web Application
 - **Current interim page (`templates/index.html`):** the "Dual-Tower Test Brain" —
@@ -515,17 +574,18 @@ Each completed step gets its own commit + push — see §13 for the commit conve
 | 4.8 | UPGRADE: RT-DETR-X detection transformer replaces YOLOv8 as Stage 1 — global self-attention, NMS-free (IoU knob removed) | **DONE (superseded by 4.9)** |
 | 4.9 | DUAL-TOWER HYBRID: YOLO26-X-SEG instance segmentation + context-aware square padding + supervised TrashNet ViT replaces CLIP + pixel-area dynamic carbon scaling (γ=5000) + polygon-mask frontend | **DONE (locator superseded by 4.10)** |
 | 4.10 | SPECIALIST LOCATOR + METHOD B: blended TACO+TrashNet waste segmenter (yolov8m-seg-trash.pt) replaces COCO-80 Stage 1 + classical-CV Plasticity Index ψ tie-breaker | **DONE (locator superseded by 4.11)** |
-| 4.11 | **DETECTION REGRESSION: specialist waste OBJECT DETECTOR (yolov8n-waste-det.pt, blended corpus) replaces segmentation as Stage 1 — box-area carbon proxy with γ recalibrated 5000→8000, classic strokeRect frontend, cleaner background rejection, nano-speed edge throughput; Method B + ViT unchanged** | **DONE (this step)** |
-| 5 | **Carbon module — live Climatiq factors (cached 1-kg probes, region-scoped) with local-dummy fallback + `POST /api/calculate-impact` (pydantic-validated weights/country, per-item + total CO2e, provider labelling)** | **DONE (this step)** |
-| 6 | Recommendation module — rule-based + optional LLM enrichment | **Next** |
-| 7 | Frontend — full SPA: Tailwind/GSAP, weight forms, results dashboard | Pending |
+| 4.11 | DETECTION REGRESSION: specialist waste OBJECT DETECTOR (yolov8n-waste-det.pt, blended corpus) replaces segmentation as Stage 1 — box-area carbon proxy with γ recalibrated 5000→8000, classic strokeRect frontend, cleaner background rejection, nano-speed edge throughput; Method B + ViT unchanged | **DONE** |
+| 5 | Carbon module — live Climatiq factors (cached 1-kg probes per (material, country, api_key), region-scoped) with local-dummy fallback + `POST /api/calculate-impact` (pydantic-validated weights/country, per-item + total CO2e, provider labelling) — the v3.5 **dual-stage carbon UX** (Stage A blind γ proxy / Stage B precision audit) | **DONE** |
+| 6 | **DECISION MAKING MODULE (v3.5): 3-path parallel end-of-life carbon simulation (taxonomy-branched: dry recyclables / organics / residual), ascending-CO2e sorting & ranking core (Optimal / Acceptable / Warning), 7×3 disposal-factor matrix with negative offset credits, structured expert knowledge base (pros/cons) + rank-aware verdicts, `POST /api/recommend` (audited weight or box-area proxy)** | **DONE (this step)** |
+| 7 | Frontend — full SPA: Tailwind/GSAP, weight forms, results dashboard | **Next** |
 | 8 | Full test suite, gunicorn deployment guide, FYP documentation | Pending |
 
 **Deliverables checklist:** multi-object upload ✓ · auto bounding boxes ✓ ·
 per-item confidence (both towers) ✓ · per-item material evidence (ViT bars) ✓ ·
 size-aware carbon estimates (box-area scaling) ✓ · real-time carbon API with
-country scoping + fallback ✓ · total + per-item CO2e (API) ✓ · per-item weight
-inputs (Step 7 UI) · structured disposal instructions (Step 6) · polished
+country scoping + fallback ✓ · total + per-item CO2e (API) ✓ · structured
+disposal instructions ✓ (DMM: ranked 3-path prescriptions with expert
+commentary, API) · per-item weight inputs (Step 7 UI) · polished
 responsive UI (Step 7).
 
 ---
@@ -662,18 +722,33 @@ retraining), whereas CLIP's was editable text.
   the full distribution (`top_k` ≥ num_labels — the pipeline's default of 5 silently
   truncates 7 classes).
 - The ViT's native `trash` label MUST map to `general rubbish` via
-  `MODEL_LABEL_TO_MATERIAL`; the 7 material strings, `DISPLAY_NAMES`, and
-  `DUMMY_CARBON_FACTORS` stay in **lockstep** (§5) — tests enforce both.
+  `MODEL_LABEL_TO_MATERIAL`; the 7 material strings, `DISPLAY_NAMES`,
+  `DUMMY_CARBON_FACTORS`, `DISPOSAL_METHOD_FACTORS`, `DISPOSAL_PATHS` and
+  `EXPERT_KNOWLEDGE` stay in **lockstep** (§5) — tests enforce full 7×3 coverage.
 - γ (`PIXEL_AREA_GAMMA` = 8000) is a code constant in `carbon_service.py`, not env.
+- The **DMM is local + deterministic by design**: never add network calls, API
+  keys, or Flask app-context dependence to `recommendation_service` or the
+  disposal-factor lookups — live regional factors belong to
+  `POST /api/calculate-impact` (Module 2). Recommendations must never 502.
+- `DISPOSAL_METHOD_FACTORS` are NET per-kg constants and **credits are
+  NEGATIVE** — never clamp them to ≥ 0 (the ranking depends on offsets), and
+  never constrain `carbon_impact_kg` / summary totals to non-negative in
+  schemas or the frontend.
+- The DMM ranks by **ascending CO2e only** (method-name tie-break) — do not
+  re-order paths by any other heuristic; `status_tag` maps 1:1 from rank
+  (1 Optimal / 2 Acceptable / 3 Warning). Verdict copy is composed at runtime
+  from the sorted outcome — never hard-wire rank assumptions into
+  `EXPERT_KNOWLEDGE` text.
 - Do not squish crops for the ViT — the processing layer's square padding exists to
   preserve aspect ratio (§2); never replace it with a naive resize.
 - **Never** put business logic in route handlers — services only.
 - **Never** commit `.env`, model weights, or the dataset (`ml/data/`).
 - **Never** make tests depend on the network, weight downloads, or a GPU — mock both
   towers and external APIs.
-- The app must run end-to-end **without** an LLM key (rule-based fallback) and, today,
-  **without** a Climatiq key (dummy coefficients until Step 5).
-- Keep carbon estimation free of any trained model — coefficients + arithmetic only.
+- The app must run end-to-end **without** an LLM key (the DMM is fully rule-based)
+  and **without** a Climatiq key (local dummy factors take over automatically).
+- Keep carbon estimation AND the DMM free of any trained model — coefficients,
+  arithmetic and a structured knowledge base only.
 
 ---
 

@@ -5,7 +5,7 @@ call a service, and return JSON. No business logic lives here.
 Endpoints:
   POST /api/predict           -> dual-tower analysis (waste detector + TrashNet ViT)
   POST /api/calculate-impact  -> CO2e for user-weighted items (Climatiq or local fallback)
-  POST /api/recommend         -> generate disposal recommendations  (Step 6)
+  POST /api/recommend         -> DMM: ranked 3-path disposal recommendations (Step 6)
 """
 import os
 import uuid
@@ -15,11 +15,27 @@ from pydantic import ValidationError
 from werkzeug.utils import secure_filename
 
 from app.schemas.carbon import CalculateImpactRequest
+from app.schemas.recommendation import RecommendRequest
 from app.services.carbon_service import calculate_impact as calculate_impact_service
 from app.services.detection_service import analyze_waste_pipeline
+from app.services.recommendation_service import recommend_for_items
 from app.utils.errors import ApiError
 
 api_bp = Blueprint("api", __name__)
+
+
+def _validated_json(schema_cls):
+    """Parse the request body against a pydantic schema; 400 on any problem."""
+    payload = request.get_json(silent=True)
+    if payload is None:
+        raise ApiError("Request body must be JSON.", status_code=400)
+    try:
+        return schema_cls(**payload)
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        loc = ".".join(str(p) for p in first.get("loc", ()))
+        raise ApiError(f"Invalid request: {loc}: {first.get('msg', 'invalid')}",
+                       status_code=400)
 
 
 @api_bp.route("/health")
@@ -101,18 +117,30 @@ def calculate_impact():
     Uses live Climatiq factors when CLIMATIQ_API_KEY is configured; falls back
     to the local dummy coefficients otherwise (the app never requires a key).
     """
-    payload = request.get_json(silent=True)
-    if payload is None:
-        raise ApiError("Request body must be JSON.", status_code=400)
-
-    try:
-        req = CalculateImpactRequest(**payload)
-    except ValidationError as exc:
-        first = exc.errors()[0]
-        loc = ".".join(str(p) for p in first.get("loc", ()))
-        raise ApiError(f"Invalid request: {loc}: {first.get('msg', 'invalid')}",
-                       status_code=400)
-
+    req = _validated_json(CalculateImpactRequest)
     result = calculate_impact_service(
         [item.model_dump() for item in req.items], req.country)
+    return jsonify(result), 200
+
+
+@api_bp.route("/recommend", methods=["POST"])
+def recommend():
+    """
+    Decision Making Module (Step 6): ranked end-of-life recommendations.
+
+    Request : JSON { "items": [{"material": "plastic", "weight_kg": 0.5},
+                               {"material": "glass", "box_area_px": 16000}] }
+              Each item needs weight_kg (user-verified) OR box_area_px (the
+              blind pixel proxy from /predict; weight = area / gamma).
+    Response: { "items": [ { material, effective_weight_kg, weight_source,
+                             best_method, max_saving_kg,
+                             recommendations: [3 ranked paths with CO2e,
+                             status_tag, verdict, pros, cons] } ],
+                "summary": {...}, "provider": "local_knowledge_base" }
+
+    Fully local and deterministic — the DMM never calls the network; live
+    region-scoped factors belong to POST /api/calculate-impact.
+    """
+    req = _validated_json(RecommendRequest)
+    result = recommend_for_items([item.model_dump() for item in req.items])
     return jsonify(result), 200

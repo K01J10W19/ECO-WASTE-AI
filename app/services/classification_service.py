@@ -34,8 +34,9 @@ logger = logging.getLogger(__name__)
 # LOCKED 7-class material taxonomy (the system-wide output vocabulary).
 #
 # These raw strings are the join key: display names (below),
-# carbon_service.DUMMY_CARBON_FACTORS and (later) recommendation rules are all
-# keyed on them. A unit test enforces lockstep.
+# carbon_service.DUMMY_CARBON_FACTORS + DISPOSAL_METHOD_FACTORS and the DMM's
+# DISPOSAL_PATHS / EXPERT_KNOWLEDGE are all keyed on them. Unit tests enforce
+# lockstep (full 7x3 coverage on the recommendation side).
 # ---------------------------------------------------------------------------
 MATERIAL_CLASSES = [
     "biodegradable",

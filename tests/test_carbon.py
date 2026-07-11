@@ -48,3 +48,31 @@ def test_dynamic_impact_unknown_label_uses_default_factor():
 def test_dynamic_impact_rejects_negative_area():
     with pytest.raises(ValueError):
         cs.estimate_dynamic_impact("metal", -10.0)
+
+
+# --- disposal-path matrix (Module 3 factor side) -----------------------------
+
+def test_disposal_factor_lookup_supports_negative_credits():
+    assert cs.get_disposal_factor("plastic", "recycling") < 0    # net offset
+    assert cs.get_disposal_factor("glass", "landfill") > 0       # net burden
+
+
+def test_estimate_disposal_impact_scales_by_weight():
+    # -4.10 kg CO2e/kg credit for metal recycling, 2 kg -> -8.2 net.
+    assert cs.estimate_disposal_impact("metal", "recycling", 2.0) == \
+        pytest.approx(-8.2)
+    assert cs.estimate_disposal_impact("paper", "landfill", 0.0) == 0.0
+
+
+def test_estimate_disposal_impact_rejects_negative_weight():
+    with pytest.raises(ValueError):
+        cs.estimate_disposal_impact("plastic", "landfill", -1.0)
+
+
+def test_disposal_factor_unknown_combination_fails_loudly():
+    from app.utils.errors import ApiError
+    with pytest.raises(ApiError) as exc:
+        cs.get_disposal_factor("plastic", "composting")   # organics-only path
+    assert exc.value.status_code == 400
+    with pytest.raises(ApiError):
+        cs.get_disposal_factor("unobtainium", "landfill")

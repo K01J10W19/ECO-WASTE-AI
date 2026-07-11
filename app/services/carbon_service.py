@@ -1,18 +1,31 @@
 """
-Carbon service — Climatiq-backed emission estimates with a local fallback.
+Carbon service — the system's carbon engine (Module 2 + Module 3's factor side).
 
-Stage 2 of the pipeline (classification_service) resolves every detected object
-to one of the 7 material classes. This module turns those material strings into
-CO2e figures two ways:
+The material tower (classification_service) resolves every detected object to
+one of the 7 material classes. This module turns those material strings into
+CO2e figures along a DUAL-STAGE UX pipeline (v3.5):
 
-  * LIVE (Step 5): when ``CLIMATIQ_API_KEY`` is configured, per-kg emission
-    factors come from the Climatiq API (material + ISO country code), fetched
-    once per (material, country) and cached for the process lifetime. Weighted
-    items are then scaled locally — one upstream call per unique material, not
-    per item.
+  * STAGE A — BLIND ESTIMATE (photo upload → /api/predict): no real weight is
+    known yet, so ``estimate_dynamic_impact`` prices each instance from its
+    clamped bounding-box geometry: base local factor x (box_area_px / gamma).
+    Deliberately 100% local and deterministic — the predict path must never
+    block on a network call.
+  * STAGE B — PRECISION AUDIT (/api/calculate-impact): the user verifies real
+    weights (kg) and optionally an ISO 3166-1 alpha-2 country. When
+    ``CLIMATIQ_API_KEY`` is configured the per-kg factor comes LIVE from the
+    Climatiq estimate endpoint as a 1-kg probe, cached via
+    ``lru_cache(maxsize=64)`` on the unique (material, country, api_key)
+    tuple; weighted items are then scaled locally — upstream request density
+    stays minimal (one call per unique factor, not per item).
   * FALLBACK: with no key (local dev, tests, offline), the DUMMY per-kg
     coefficients below keep the whole stack working end-to-end. The app MUST
     always boot and pass tests without any API key (CLAUDE.md hard rule).
+
+MODULE 3 SUPPORT (Decision Making Module): ``DISPOSAL_METHOD_FACTORS`` +
+``estimate_disposal_impact`` price the SAME item down three alternative
+end-of-life routes for recommendation_service's ranked simulation. These are
+deliberately local-only and app-context-free — the DMM fans them out across
+worker threads and its ranking must stay deterministic and offline-safe.
 
 Public lookup signatures (``get_carbon_factor``, ``estimate_impact``,
 ``estimate_dynamic_impact``) are unchanged from the placeholder era;
@@ -59,6 +72,62 @@ DEFAULT_CARBON_FACTOR = 1.00
 # The mask-era gamma of 5000 is therefore scaled to 5000 / 0.625 = 8000 so
 # carbon magnitudes stay comparable across the locator generations.
 PIXEL_AREA_GAMMA = 8000.0
+
+# ---------------------------------------------------------------------------
+# Module 3 (Decision Making Module) — end-of-life DISPOSAL-PATH matrix.
+#
+# NET kg CO2e per kg of material for each simulated end-of-life route,
+# INCLUDING avoided-burden credits: NEGATIVE values are net offsets (e.g.
+# recycling metal displaces energy-hungry ore smelting). Values are
+# literature-order heuristics (EPA WARM / UK BEIS flavour), NOT authoritative
+# — like the dummy production factors above they exist so the decision layer
+# stays deterministic, offline and fully auditable (every factor used is
+# echoed back in the recommendation payload).
+#
+# GHG-only lens, documented honestly: landfilled plastic is biologically
+# inert, so it out-scores incineration on pure CO2e — the DMM's knowledge
+# base carries the microplastic caveat that this number cannot see.
+#
+# Keys MUST stay in lockstep with classification_service.MATERIAL_CLASSES and
+# recommendation_service.DISPOSAL_PATHS — tests enforce full 7x3 coverage.
+# ---------------------------------------------------------------------------
+DISPOSAL_METHOD_FACTORS = {
+    "plastic": {
+        "recycling": -1.08,       # avoided virgin polymer (petroleum) production
+        "incineration": 2.35,     # fossil carbon to atmosphere, minus energy credit
+        "landfill": 0.09,         # biologically inert: collection/equipment only
+    },
+    "glass": {
+        "recycling": -0.31,       # cullet remelt beats virgin batch calcination
+        "incineration": 0.03,     # non-combustible: furnace dead-weight, no energy
+        "landfill": 0.02,         # chemically stable, no gas generation
+    },
+    "metal": {
+        "recycling": -4.10,       # smelting avoidance (Al ~ -9, steel ~ -1.8, blended)
+        "incineration": 0.03,     # passes to bottom ash; no calorific contribution
+        "landfill": 0.02,         # structurally stable; embodied energy forfeited
+    },
+    "cardboard": {
+        "recycling": -0.96,       # repulping displaces virgin kraft pulping
+        "incineration": 0.07,     # biogenic carbon, near-neutral after energy credit
+        "landfill": 1.10,         # anaerobic fibre decomposition -> methane
+    },
+    "paper": {
+        "recycling": -0.89,       # avoided virgin pulping (most energy-intense stage)
+        "incineration": 0.09,     # biogenic carbon, near-neutral after energy credit
+        "landfill": 1.29,         # most methane-productive landfill fibre
+    },
+    "biodegradable": {
+        "composting": 0.05,       # small process CH4/N2O; soil-carbon return
+        "anaerobic_digestion": -0.14,  # captured biogas displaces fossil energy
+        "landfill": 0.90,         # uncontrolled anaerobic decomposition -> methane
+    },
+    "general rubbish": {
+        "material_recovery": 0.30,  # MRF/MBT residual sorting: modest reclaim credit
+        "incineration": 0.45,       # mixed-stream WtE: fossil fraction minus energy
+        "landfill": 1.20,           # decades of methane + leachate management
+    },
+}
 
 # ---------------------------------------------------------------------------
 # Climatiq integration (Step 5).
@@ -206,6 +275,38 @@ def estimate_dynamic_impact(label: str, area_px: float) -> float:
     if area_px < 0:
         raise ValueError("area_px must be non-negative")
     return round(get_carbon_factor(label) * (area_px / PIXEL_AREA_GAMMA), 4)
+
+
+def get_disposal_factor(material: str, method: str) -> float:
+    """
+    Net per-kg CO2e factor for sending ``material`` down one ``method``
+    (end-of-life route). NEGATIVE values are net offsets (avoided-burden
+    credits — e.g. recycling displacing virgin production).
+
+    LOCAL and app-context-free by design: the Decision Making Module calls
+    this from worker threads (no Flask context available) and its ranking
+    must never block on the network. Unknown combinations fail loudly.
+    """
+    try:
+        return DISPOSAL_METHOD_FACTORS[material][method]
+    except KeyError as exc:
+        valid = ", ".join(DISPOSAL_METHOD_FACTORS.get(material, {})) or "none"
+        raise ApiError(
+            f"No disposal factor for material '{material}' via method "
+            f"'{method}'. Valid methods for this material: {valid}.",
+            status_code=400,
+        ) from exc
+
+
+def estimate_disposal_impact(material: str, method: str, weight_kg: float) -> float:
+    """
+    Net CO2e (kg) for ``weight_kg`` of ``material`` down one end-of-life
+    route: disposal factor x weight. May be NEGATIVE (a net carbon offset).
+    Pure local arithmetic — safe for the DMM's parallel path fan-out.
+    """
+    if weight_kg < 0:
+        raise ValueError("weight_kg must be non-negative")
+    return round(get_disposal_factor(material, method) * weight_kg, 4)
 
 
 def calculate_impact(items: list, country: str = None) -> dict:
