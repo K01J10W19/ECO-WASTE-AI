@@ -69,9 +69,17 @@ class BaseConfig:
     CLIMATIQ_API_KEY = os.getenv("CLIMATIQ_API_KEY", "")
     CARBON_INTERFACE_API_KEY = os.getenv("CARBON_INTERFACE_API_KEY", "")
 
-    # --- LLM (optional enrichment layer) ---
+    # --- LLM (optional v3.6 child-friendly, country-localized text layer) ---
+    # Any OpenAI-compatible chat-completions endpoint works; free tiers:
+    #   Groq        https://api.groq.com/openai/v1/chat/completions   (default)
+    #   OpenRouter  https://openrouter.ai/api/v1/chat/completions
+    #   Gemini      https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
+    #   Ollama      http://localhost:11434/v1/chat/completions        (fully local)
+    # Blank LLM_API_KEY = deterministic local knowledge-grid text (always works).
     LLM_API_KEY = os.getenv("LLM_API_KEY", "")
-    LLM_MODEL = os.getenv("LLM_MODEL", "claude-sonnet-4-6")
+    LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+    LLM_API_URL = os.getenv("LLM_API_URL",
+                            "https://api.groq.com/openai/v1/chat/completions")
 
 
 class DevelopmentConfig(BaseConfig):
@@ -86,9 +94,10 @@ class TestingConfig(BaseConfig):
     TESTING = True
     SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
     WTF_CSRF_ENABLED = False
-    # Tests must be hermetic: never inherit a real carbon key from .env.
-    # Tests that exercise the live path set this explicitly (with HTTP mocked).
+    # Tests must be hermetic: never inherit real API keys from .env.
+    # Tests that exercise the live paths set these explicitly (HTTP mocked).
     CLIMATIQ_API_KEY = ""
+    LLM_API_KEY = ""
 
 
 config_by_name = {

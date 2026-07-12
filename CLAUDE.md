@@ -24,8 +24,11 @@
 The project went through several pivots (custom training → single-stage YOLO-World →
 two-stage with abstract anchors → two-stage vanilla YOLOv8 → two-stage RT-DETR-X →
 COCO-80 YOLO26-seg → blended-waste segmenter → box-detector regression (v3.2) →
-**this, v3.5**: the v3.2 towers unchanged, now orchestrating a dual-stage carbon
-UX (Module 2) and the Decision Making Module (Module 3) downstream). The paradigm is
+v3.5 dual-stage carbon UX + DMM → **this, v3.6**: the v3.2 towers and the v3.5
+numeric engines unchanged, with the DMM's text layer upgraded to an OPTIONAL
+child-friendly, country-localized LLM generation pipeline over free
+OpenAI-compatible endpoints, deterministic local grid as the ever-present
+fallback). The paradigm is
 **edge-native and 100% local**: two frozen local models plus a classical-CV layer,
 no cloud inference. Localization and classification are **decoupled**, and each tower
 plays its architectural strength — **CNN spatial localization for WHERE, ViT global
@@ -186,10 +189,14 @@ Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
       live Climatiq factor per unique (material, country, api_key) via
       cached 1-kg probes, scaled locally; blank key → dummy factors;
       blank/omitted country → Climatiq global dataset
-  → POST /api/recommend  {items:[{material, weight_kg? | box_area_px?}]}
+  → POST /api/recommend  {items:[{material, weight_kg? | box_area_px?}],
+                          country?}
       DECISION MAKING MODULE — forks each item into 3 taxonomy-branched
       end-of-life paths in parallel, ranks ascending CO2e (rank 1 = Optimal),
-      returns status tags + rank-aware verdicts + expert pros/cons per path
+      returns status tags + verdicts + pros/cons per path; text fields come
+      from the v3.6 LLM pipeline when LLM_API_KEY is set (child-simple,
+      localized to `country`) else the local grid — provider labelled
+      llm_enriched | local_knowledge_base | local_fallback
 ```
 
 **Hard rules:**
@@ -225,7 +232,8 @@ Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
 | Carbon scaling | `estimated_carbon_kg = base x (box_area_px / γ)`, **γ = 8000** (recalibrated from 5000 for rectangular over-coverage, fill factor ~0.6) | Box area as volume/mass proxy until Step 5's real weights. |
 | Carbon provider | **Climatiq** (live, Step 5) with the **dummy per-kg coefficients** in `carbon_service.py` as the ever-present blank-key fallback | Dual-stage UX: blind local proxy at upload, audited live factors on user verification; the app never requires a key. |
 | Disposal-path matrix (DMM) | `carbon_service.DISPOSAL_METHOD_FACTORS` — 7 materials × 3 routes of NET kg CO2e/kg code constants; **credits are NEGATIVE** (offsets) | Deterministic, offline, auditable (every factor echoed in the payload); the ranking must never block on the network — live regional factors stay Module 2's audit concern. |
-| Recommendation engine | **Decision Making Module (DMM)** — rule-based 3-path parallel carbon simulation + ascending-CO2e ranking + structured expert knowledge base (`recommendation_service.py`); LLM enrichment remains an OPTIONAL future hook | Deterministic engine is the gradeable default; must work fully with no LLM key. |
+| Recommendation engine | **Decision Making Module (DMM)** — rule-based 3-path parallel carbon simulation + ascending-CO2e ranking (`recommendation_service.py`); numbers are ALWAYS local | Deterministic engine is the gradeable default; must work fully with no LLM key. |
+| DMM text layer (v3.6) | **Child-Friendly, Country-Localized LLM Generation Pipeline** — one batched strict-JSON call to any free OpenAI-compatible endpoint (`LLM_API_URL`/`LLM_MODEL`, Groq default) rewrites ONLY verdict/pros/cons (1–2 sentences, ≤25 words, zero jargon, localized to `country`); local `EXPERT_KNOWLEDGE` grid (same hyper-simple register) is the default and the atomic fallback | Free-tier friendly, provider-agnostic, zero new deps (`requests`); any LLM failure degrades to `local_fallback` — recommendations never 502. |
 | Backend | **Flask** (app factory + blueprints + services) | Thin controllers, logic in services. |
 | Frontend | HTML5 + Tailwind CSS + native JS (ES6+, Fetch API) + GSAP | SPA. Current interim page is a vanilla "Test Brain" tester with a classic bounding-box overlay + inspector; polished UI is Step 7. |
 | Database | SQLite (optional, for scan history) | Lightweight, local, file-based. |
@@ -249,7 +257,7 @@ Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
 - **Frontend:** HTML5, Tailwind CSS, vanilla JavaScript (Fetch API), GSAP (Step 7); interim test page is dependency-free vanilla HTML/CSS/JS (Canvas 2D `strokeRect` bounding-box rendering)
 - **Database:** SQLite (via SQLAlchemy)
 - **External APIs:** Climatiq (carbon, Step 5) — Carbon Interface kept as alternate adapter
-- **Optional:** Anthropic/LLM API for recommendation enrichment
+- **Optional:** any free OpenAI-compatible LLM endpoint (Groq / OpenRouter / Gemini compat / local Ollama) for the v3.6 DMM text layer — plain `requests`, no SDK
 - **Testing:** pytest, pytest-mock (both model towers mocked; no network/GPU in tests)
 - **Serving (prod):** gunicorn
 - **GPU:** optional CUDA build of torch (`cu121`); `INFERENCE_DEVICE` drives BOTH towers
@@ -442,7 +450,7 @@ Rules:
   auth/timeout/network/shape problems → 502 with a user-facing message —
   all via `ApiError`, nothing 500s silently (no naked stack traces).
 
-### Module 3 — Recommendation System: the DECISION MAKING MODULE (DMM) — DONE (Step 6)
+### Module 3 — Recommendation System: the DECISION MAKING MODULE (DMM) — DONE (Step 6; v3.6 Child-Friendly, Country-Localized LLM Generation Pipeline)
 - **Goal:** convert the carbon engine's quantitative data into qualitative,
   ORDERED prescriptions — not one default disposal answer but a ranked
   comparison of realistic end-of-life choices, with expert commentary.
@@ -458,14 +466,32 @@ Rules:
   (lowest footprint / deepest negative offset wins; ties fall back to method
   name so ranking is fully deterministic): Rank 1 = Optimal green path,
   Rank 2 = Acceptable, Rank 3 = Warning (worst-case baseline).
-- **Structured expert knowledge base:** `EXPERT_KNOWLEDGE` (7×3 matrix) attaches
-  professional `environmental_pros` / `environmental_cons` to every path;
-  the `encouraging_verdict` is composed at runtime from the SORTED outcome
-  (rank + display names + kg CO2e saved/added), so recalibrated factors can
-  reshuffle ranks without the copy drifting. Per-path payload:
+- **Local knowledge grid (v3.6 hyper-simple register):** `EXPERT_KNOWLEDGE`
+  (7×3 matrix) attaches plain-language `environmental_pros` /
+  `environmental_cons` to every path — 1–2 punchy sentences, ≤25 words,
+  child-readable, grounded facts (tests enforce the word budget); the
+  `encouraging_verdict` is composed at runtime from the SORTED outcome
+  (rank + kg CO2e saved/added), so recalibrated factors can reshuffle ranks
+  without the copy drifting. Per-path payload:
   `{ method, method_display, rank, status_tag, carbon_factor_kg_per_kg,
   carbon_impact_kg, encouraging_verdict, environmental_pros,
   environmental_cons }`.
+- **v3.6 LLM text layer (optional, free-provider):** when `LLM_API_KEY` is
+  set, ONE batched call per request to the OpenAI-compatible chat-completions
+  endpoint at `LLM_API_URL` (free tiers: Groq — default, `LLM_MODEL`
+  `llama-3.3-70b-versatile` — OpenRouter, Gemini compat, or fully local
+  Ollama) rewrites the three literary fields per path. The
+  `LLM_SYSTEM_PROMPT` enforces the "Hyper-Simple & Country-Aware" standard:
+  ≤25 words per field, jargon banlist (no "carbon-negative"/"offset"/"CO2e"),
+  everyday impact imagery, verdicts that weave in the exact numbers, and
+  pros/cons grounded in the request `country`'s reality (beaches/landfills/
+  power grid) — or universal "global average" text when no country is given.
+  The LLM sees the numbers READ-ONLY (strict-JSON in/out, lenient fence
+  parsing); replacements are staged and applied atomically only after full
+  7×3-coverage validation. ANY failure (auth, 429 rate limit, timeout,
+  malformed output, partial coverage) logs a warning and serves the local
+  grid — `provider` labels the outcome:
+  `llm_enriched` | `local_knowledge_base` (no key) | `local_fallback`.
 - **Weight resolution (dual-stage aware):** a user-verified `weight_kg` (Stage B)
   always wins; otherwise `box_area_px / γ` (the Stage-A blind proxy — the same
   calibration `/predict` uses), via the SHARED
@@ -473,18 +499,21 @@ Rules:
   `/api/calculate-impact` also runs. At least one is required; the payload
   labels `weight_source` (`user_weight` | `box_area_proxy`).
 - **Endpoint:** `POST /api/recommend` — body
-  `{items:[{material, weight_kg?, box_area_px?}]}` validated by
+  `{items:[{material, weight_kg?, box_area_px?}], country?}` validated by
   `schemas/recommendation.RecommendRequest` (≤100 items, weight (0, 1000] kg,
-  area ≤ 1000·γ); returns per-item ranked `recommendations[3]` + `best_method`
-  + `max_saving_kg`, an aggregate `summary` (optimal-vs-worst totals — may be
-  negative thanks to offsets) and `provider: "local_knowledge_base"`.
-- **Deliberately 100% local & deterministic:** no network, no API key, no app
-  context (thread-pool safe) — live regional factors remain Module 2's audit
-  concern. Honest GHG-only lens: inert landfilled plastic out-scores
-  incineration on pure CO2e (rank 2), and the cons text carries the 400-year
-  microplastic caveat the number cannot see (report talking point).
-- **Optional LLM enrichment:** still a future hook (`LLM_API_KEY` reserved);
-  the DMM core MUST keep working with no LLM key.
+  area ≤ 1000·γ, blank country → None/global); returns per-item ranked
+  `recommendations[3]` + `best_method` + `max_saving_kg`, an aggregate
+  `summary` (optimal-vs-worst totals — may be negative thanks to offsets),
+  the echoed `country` and the `provider` tag.
+- **Numeric core stays 100% local & deterministic:** the simulation, factors
+  and ranking never touch the network, need no key and no app context
+  (thread-pool safe) — the LLM layer is the module's ONLY network touchpoint,
+  runs once per request in the request thread, may only rewrite text, and can
+  never block, reorder or 502 the ranking. Live regional FACTORS remain
+  Module 2's audit concern. Honest GHG-only lens: inert landfilled plastic
+  out-scores incineration on pure CO2e (rank 2), and the cons text carries
+  the 400-year microplastic caveat the number cannot see (report talking
+  point).
 
 ### Module 4 — Web Application
 - **Current interim page (`templates/index.html`):** the "Dual-Tower Test Brain" —
@@ -536,8 +565,12 @@ CARBON_PROVIDER=climatiq          # or carbon_interface
 CLIMATIQ_API_KEY=<from climatiq.io dashboard — blank = local dummy factors>
 CARBON_INTERFACE_API_KEY=         # only if using that provider
 
-LLM_API_KEY=                      # OPTIONAL — leave blank for rule-based only
-LLM_MODEL=claude-sonnet-4-6
+LLM_API_KEY=                      # OPTIONAL v3.6 text layer — blank = local grid copy
+LLM_MODEL=llama-3.3-70b-versatile # any model at the endpoint below
+LLM_API_URL=https://api.groq.com/openai/v1/chat/completions
+                                  # any OpenAI-compatible chat-completions URL:
+                                  # Groq (free default) | OpenRouter | Gemini compat
+                                  # | http://localhost:11434/v1/chat/completions (Ollama)
 
 MODEL_PATH=models/yolov8n-waste-det.pt   # Stage 1 specialist detector (auto-fetched if missing)
                                           # A/B: models/yolov8m-seg-trash.pt | yolo26x-seg.pt
@@ -606,7 +639,8 @@ Each completed step gets its own commit + push — see §13 for the commit conve
 | 4.10 | SPECIALIST LOCATOR + METHOD B: blended TACO+TrashNet waste segmenter (yolov8m-seg-trash.pt) replaces COCO-80 Stage 1 + classical-CV Plasticity Index ψ tie-breaker | **DONE (locator superseded by 4.11)** |
 | 4.11 | DETECTION REGRESSION: specialist waste OBJECT DETECTOR (yolov8n-waste-det.pt, blended corpus) replaces segmentation as Stage 1 — box-area carbon proxy with γ recalibrated 5000→8000, classic strokeRect frontend, cleaner background rejection, nano-speed edge throughput; Method B + ViT unchanged | **DONE** |
 | 5 | Carbon module — live Climatiq factors (cached 1-kg probes per (material, country, api_key), region-scoped) with local-dummy fallback + `POST /api/calculate-impact` (pydantic-validated weights/country, per-item + total CO2e, provider labelling) — the v3.5 **dual-stage carbon UX** (Stage A blind γ proxy / Stage B precision audit) | **DONE** |
-| 6 | **DECISION MAKING MODULE (v3.5): 3-path parallel end-of-life carbon simulation (taxonomy-branched: dry recyclables / organics / residual), ascending-CO2e sorting & ranking core (Optimal / Acceptable / Warning), 7×3 disposal-factor matrix with negative offset credits, structured expert knowledge base (pros/cons) + rank-aware verdicts, `POST /api/recommend` (audited weight or box-area proxy)** | **DONE (this step)** |
+| 6 | DECISION MAKING MODULE (v3.5): 3-path parallel end-of-life carbon simulation (taxonomy-branched: dry recyclables / organics / residual), ascending-CO2e sorting & ranking core (Optimal / Acceptable / Warning), 7×3 disposal-factor matrix with negative offset credits, structured expert knowledge base (pros/cons) + rank-aware verdicts, `POST /api/recommend` (audited weight or box-area proxy) | **DONE** |
+| 6.5 | **v3.6 DMM TEXT LAYER: Child-Friendly, Country-Localized LLM Generation Pipeline — hyper-simple system prompt (≤25 words/field, jargon banlist, numbers woven in), one batched strict-JSON call to a free OpenAI-compatible endpoint (Groq default; OpenRouter/Gemini/Ollama), `country` context injection with "global average" default, atomic staged application, seamless `local_fallback` on any failure, knowledge grid rewritten to the same simple register** | **DONE (this step)** |
 | 7 | Frontend — full SPA: Tailwind/GSAP, weight forms, results dashboard | **Next** |
 | 8 | Full test suite, gunicorn deployment guide, FYP documentation | Pending |
 
@@ -761,10 +795,23 @@ retraining), whereas CLIP's was editable text.
   server-side — item order in == item order out. Weight substitution goes
   through the shared `carbon_service.resolve_effective_weight` for BOTH
   `/api/calculate-impact` and the DMM — never fork a second copy of that rule.
-- The **DMM is local + deterministic by design**: never add network calls, API
-  keys, or Flask app-context dependence to `recommendation_service` or the
-  disposal-factor lookups — live regional factors belong to
-  `POST /api/calculate-impact` (Module 2). Recommendations must never 502.
+- The **DMM's NUMERIC core is local + deterministic by design**: never add
+  network calls, API keys, or Flask app-context dependence to the simulation,
+  ranking or disposal-factor lookups — live regional factors belong to
+  `POST /api/calculate-impact` (Module 2). The v3.6 LLM layer is the module's
+  ONLY network touchpoint: it may ONLY rewrite the three text fields (never
+  ranks, methods, numbers or item order), it runs once per request in the
+  request thread (never inside the path thread-pool), and EVERY failure mode
+  must degrade to the local grid with `provider: "local_fallback"` —
+  recommendations must never 502 because of the LLM.
+- The LLM endpoint is **OpenAI-compatible chat-completions via `requests`**
+  (`LLM_API_URL`/`LLM_MODEL`/`LLM_API_KEY`) — do not add provider SDKs, and
+  keep `TestingConfig.LLM_API_KEY = ""` so tests stay hermetic (LLM tests
+  monkeypatch `requests.post`, mirroring the Climatiq pattern).
+- Keep the v3.6 register in lockstep: `EXPERT_KNOWLEDGE` copy and the runtime
+  verdicts obey the same "≤25 words, child-simple, no jargon" standard as
+  `LLM_SYSTEM_PROMPT` (a test enforces the word budget) — if the standard
+  changes, change the prompt, the grid and the test together.
 - `DISPOSAL_METHOD_FACTORS` are NET per-kg constants and **credits are
   NEGATIVE** — never clamp them to ≥ 0 (the ranking depends on offsets), and
   never constrain `carbon_impact_kg` / summary totals to non-negative in
@@ -780,10 +827,12 @@ retraining), whereas CLIP's was editable text.
 - **Never** commit `.env`, model weights, or the dataset (`ml/data/`).
 - **Never** make tests depend on the network, weight downloads, or a GPU — mock both
   towers and external APIs.
-- The app must run end-to-end **without** an LLM key (the DMM is fully rule-based)
-  and **without** a Climatiq key (local dummy factors take over automatically).
-- Keep carbon estimation AND the DMM free of any trained model — coefficients,
-  arithmetic and a structured knowledge base only.
+- The app must run end-to-end **without** an LLM key (the DMM's numbers are
+  rule-based and the local text grid always exists) and **without** a Climatiq
+  key (local dummy factors take over automatically).
+- Keep the carbon numbers AND the DMM ranking free of any trained model —
+  coefficients, arithmetic and a structured knowledge base only; the LLM may
+  phrase the story, never compute it.
 
 ---
 

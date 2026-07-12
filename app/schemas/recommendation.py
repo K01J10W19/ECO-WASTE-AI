@@ -8,7 +8,7 @@ NEGATIVE — recycling/digestion paths carry avoided-burden credits.
 """
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.services.carbon_service import PIXEL_AREA_GAMMA
 
@@ -39,6 +39,17 @@ class RecommendRequest(BaseModel):
     """Body of POST /api/recommend."""
 
     items: List[RecommendationItemRequest] = Field(min_length=1, max_length=100)
+    # ISO 3166-1 alpha-2 (e.g. the frontend's IP-geolocated default) — only
+    # flavours the v3.6 LLM text layer; the carbon numbers stay identical.
+    country: Optional[str] = Field(default=None, pattern=r"^[A-Za-z]{2}$")
+
+    @field_validator("country", mode="before")
+    @classmethod
+    def _blank_country_means_global(cls, value):
+        """'' / whitespace → None: the text layer speaks in global averages."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 class DisposalRecommendation(BaseModel):
@@ -81,4 +92,8 @@ class RecommendResponse(BaseModel):
 
     items: List[RecommendedItem]
     summary: RecommendSummary
-    provider: str                         # "local_knowledge_base"
+    country: Optional[str] = None         # echoed ISO code (None = global)
+    # "llm_enriched"        — v3.6 LLM text layer rewrote the literary fields
+    # "local_knowledge_base" — no LLM key configured (deterministic default)
+    # "local_fallback"      — LLM configured but failed; local grid took over
+    provider: str

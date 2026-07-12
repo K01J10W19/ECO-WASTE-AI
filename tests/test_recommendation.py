@@ -2,13 +2,18 @@
 Tests for Module 3 — the Decision Making Module (recommendation_service) and
 POST /api/recommend.
 
-The DMM is deliberately local + deterministic (no network, no app context, no
-API keys), so these tests exercise the real code paths end-to-end: taxonomy
-branching, the parallel 3-path simulation, the ascending-CO2e sorting engine,
-the expert knowledge base coverage, weight resolution (user weight vs the
-box-area pixel proxy) and the endpoint contract.
+The DMM's NUMERIC core is local + deterministic (no network, no app context,
+no API keys), so those paths run for real: taxonomy branching, the parallel
+3-path simulation, the ascending-CO2e sorting engine, knowledge-grid
+coverage, weight resolution and the endpoint contract. The v3.6 LLM text
+layer is exercised against a MOCKED OpenAI-compatible endpoint — no network,
+and TestingConfig blanks LLM_API_KEY so everything stays hermetic.
 """
+import json as jsonlib
+import types
+
 import pytest
+import requests
 
 from app.schemas.recommendation import RecommendResponse
 from app.services import carbon_service as cs
@@ -186,6 +191,8 @@ def test_endpoint_rejects_bad_payloads(client):
         {"items": [{"material": "plastic", "weight_kg": 0}]},     # weight <= 0
         {"items": [{"material": "plastic", "weight_kg": 2000}]},  # weight > cap
         {"items": [{"material": "plastic", "box_area_px": -5}]},  # negative area
+        {"items": [{"material": "plastic", "weight_kg": 1}],
+         "country": "MYS"},                                        # bad ISO code
     ]
     for payload in cases:
         res = client.post("/api/recommend", json=payload)
@@ -194,3 +201,159 @@ def test_endpoint_rejects_bad_payloads(client):
     res = client.post("/api/recommend",
                       json={"items": [{"material": "vibranium", "weight_kg": 1}]})
     assert res.status_code == 400   # unknown material from the service layer
+
+
+def test_endpoint_blank_country_defaults_to_global(client):
+    res = client.post("/api/recommend", json={
+        "items": [{"material": "glass", "weight_kg": 1.0}], "country": ""})
+    assert res.status_code == 200
+    body = res.get_json()
+    assert body["country"] is None
+    assert body["provider"] == "local_knowledge_base"   # hermetic: no LLM key
+
+
+# --- v3.6 LLM text layer (mocked OpenAI-compatible endpoint) ------------------
+
+def _llm_http_response(status_code=200, content_text=""):
+    """Fake requests.Response for a chat-completions call."""
+    return types.SimpleNamespace(
+        status_code=status_code,
+        json=lambda: {"choices": [{"message": {"content": content_text}}]})
+
+
+def _valid_generation_from(request_body):
+    """Build a fully-covering, child-simple generation from the sent context."""
+    ctx = jsonlib.loads(request_body["messages"][1]["content"])
+    return jsonlib.dumps({"items": [
+        {"index": item["index"], "paths": [
+            {"method": path["method"],
+             "encouraging_verdict": f"Rank {path['rank']} — nice and simple!",
+             "environmental_pros": "Saves electricity for your town.",
+             "environmental_cons": "Trash can end up on our beaches."}
+            for path in item["paths"]]}
+        for item in ctx["items"]]})
+
+
+def test_llm_layer_enriches_fields_and_localizes_country(app, monkeypatch):
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["url"], captured["body"], captured["headers"] = url, json, headers
+        return _llm_http_response(200, _valid_generation_from(json))
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    with app.app_context():
+        app.config["LLM_API_KEY"] = "free-tier-key"
+        out = rs.recommend_for_items(
+            [{"material": "plastic", "weight_kg": 0.5}], country="my")
+
+    assert out["provider"] == "llm_enriched"
+    assert out["country"] == "MY"
+    # OpenAI-compatible request shape: bearer auth, configured URL + model.
+    with app.app_context():
+        assert captured["url"] == app.config["LLM_API_URL"]
+        assert captured["body"]["model"] == app.config["LLM_MODEL"]
+    assert captured["headers"]["Authorization"] == "Bearer free-tier-key"
+    # The hyper-simple constraints ride in the system prompt; the country and
+    # the read-only numbers ride in the user message.
+    system_prompt = captured["body"]["messages"][0]["content"]
+    assert "25 words" in system_prompt
+    context = jsonlib.loads(captured["body"]["messages"][1]["content"])
+    assert context["country"] == "MY"
+    assert context["items"][0]["paths"][0]["carbon_impact_kg"] == pytest.approx(-0.54)
+    # Text fields replaced; numbers, ranks and method ids untouched.
+    top = out["items"][0]["recommendations"][0]
+    assert top["encouraging_verdict"] == "Rank 1 — nice and simple!"
+    assert top["environmental_pros"] == "Saves electricity for your town."
+    assert top["method"] == "recycling"
+    assert top["carbon_impact_kg"] == pytest.approx(-0.54)
+    RecommendResponse(**out)
+
+
+def test_llm_layer_speaks_global_average_without_country(app, monkeypatch):
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["body"] = json
+        return _llm_http_response(200, _valid_generation_from(json))
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    with app.app_context():
+        app.config["LLM_API_KEY"] = "k"
+        out = rs.recommend_for_items([{"material": "glass", "weight_kg": 1.0}])
+
+    context = jsonlib.loads(captured["body"]["messages"][1]["content"])
+    assert context["country"] == "global average"
+    assert out["country"] is None
+    assert out["provider"] == "llm_enriched"
+
+
+def test_llm_rate_limit_falls_back_to_local_grid(app, monkeypatch):
+    monkeypatch.setattr(requests, "post",
+                        lambda *a, **k: _llm_http_response(429))
+
+    with app.app_context():
+        app.config["LLM_API_KEY"] = "k"
+        out = rs.recommend_for_items([{"material": "paper", "weight_kg": 1.0}])
+
+    assert out["provider"] == "local_fallback"          # identity tag intact
+    landfill = next(p for p in out["items"][0]["recommendations"]
+                    if p["method"] == "landfill")
+    assert landfill["environmental_cons"] == \
+        rs.EXPERT_KNOWLEDGE["paper"]["landfill"]["cons"]   # grid copy served
+    RecommendResponse(**out)
+
+
+def test_llm_timeout_and_garbage_output_fall_back(app, monkeypatch):
+    monkeypatch.setattr(
+        requests, "post",
+        lambda *a, **k: (_ for _ in ()).throw(requests.exceptions.Timeout("slow")))
+    with app.app_context():
+        app.config["LLM_API_KEY"] = "k"
+        out = rs.recommend_for_items([{"material": "metal", "weight_kg": 1.0}])
+    assert out["provider"] == "local_fallback"
+
+    monkeypatch.setattr(requests, "post",
+                        lambda *a, **k: _llm_http_response(200, "sorry, no json"))
+    with app.app_context():
+        app.config["LLM_API_KEY"] = "k"
+        out = rs.recommend_for_items([{"material": "metal", "weight_kg": 1.0}])
+    assert out["provider"] == "local_fallback"
+
+
+def test_partial_llm_coverage_is_rejected_atomically(app, monkeypatch):
+    # The generation covers only ONE of the three paths → the whole enrichment
+    # is discarded and NO field is left half-mutated.
+    def fake_post(url, json=None, headers=None, timeout=None):
+        ctx = jsonlib.loads(json["messages"][1]["content"])
+        first = ctx["items"][0]["paths"][0]
+        return _llm_http_response(200, jsonlib.dumps({"items": [
+            {"index": 0, "paths": [{"method": first["method"],
+                                    "encouraging_verdict": "x",
+                                    "environmental_pros": "y",
+                                    "environmental_cons": "z"}]}]}))
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    with app.app_context():
+        app.config["LLM_API_KEY"] = "k"
+        out = rs.recommend_for_items([{"material": "plastic", "weight_kg": 1.0}])
+
+    assert out["provider"] == "local_fallback"
+    assert all(p["encouraging_verdict"] not in ("x",)
+               for p in out["items"][0]["recommendations"])
+
+
+def test_fallback_grid_and_verdicts_respect_the_word_budget():
+    # v3.6 register lockstep: the local grid obeys the same "hyper-simple,
+    # <= 25 words" standard the LLM prompt enforces (small tokenizer buffer).
+    for material, methods in rs.DISPOSAL_PATHS.items():
+        for method in methods:
+            entry = rs.EXPERT_KNOWLEDGE[material][method]
+            assert len(entry["pros"].split()) <= 28, (material, method)
+            assert len(entry["cons"].split()) <= 28, (material, method)
+        for path in rs.simulate_disposal_paths(material, 1.0):
+            assert len(path["encouraging_verdict"].split()) <= 28, \
+                (material, path["method"])

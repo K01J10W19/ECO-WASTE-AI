@@ -110,7 +110,7 @@
       <button class="action" id="impact">POST /api/calculate-impact</button>
       <button class="action" id="recommend">POST /api/recommend</button>
       <div class="country-box">
-        <label class="hint" for="country">country (impact only)</label>
+        <label class="hint" for="country">country (both calls)</label>
         <input id="country" maxlength="2" placeholder="MY" />
       </div>
     </div>
@@ -131,7 +131,8 @@
 
   <!-- ============ Module 3 result ============ -->
   <div class="card" id="rec-card" style="display:none">
-    <h2>Module 3 — Decision Making Module (ranked end-of-life paths)</h2>
+    <h2>Module 3 — Decision Making Module (ranked end-of-life paths)
+      <span class="badge provider" id="rec-provider"></span></h2>
     <div id="rec-out"></div>
     <div class="json-label">request sent</div><pre id="rec-req"></pre>
     <div class="json-label">response</div><pre id="rec-res"></pre>
@@ -257,10 +258,15 @@ $("#recommend").onclick = async () => {
       return item;
     });
     if (!items.length) throw new Error("add at least one item");
+    const body = { items };
+    const country = $("#country").value.trim();
+    if (country) body.country = country;   // localizes the v3.6 LLM text layer
 
     const card = $("#rec-card"); card.style.display = "block";
-    const data = await post("/api/recommend", { items }, $("#rec-req"), $("#rec-res"));
+    const data = await post("/api/recommend", body, $("#rec-req"), $("#rec-res"));
 
+    $("#rec-provider").textContent = `provider: ${data.provider}` +
+      (data.country ? ` · ${data.country}` : "");
     $("#rec-out").innerHTML = data.items.map(item => `
       <div class="rec-item">
         <div class="rec-head">

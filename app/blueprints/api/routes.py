@@ -135,18 +135,26 @@ def recommend():
     Decision Making Module (Step 6): ranked end-of-life recommendations.
 
     Request : JSON { "items": [{"material": "plastic", "weight_kg": 0.5},
-                               {"material": "glass", "box_area_px": 16000}] }
+                               {"material": "glass", "box_area_px": 16000}],
+                     "country": "MY" (optional ISO alpha-2; blank = global) }
               Each item needs weight_kg (user-verified) OR box_area_px (the
               blind pixel proxy from /predict; weight = area / gamma).
     Response: { "items": [ { material, effective_weight_kg, weight_source,
                              best_method, max_saving_kg,
                              recommendations: [3 ranked paths with CO2e,
                              status_tag, verdict, pros, cons] } ],
-                "summary": {...}, "provider": "local_knowledge_base" }
+                "summary": {...}, "country",
+                "provider": "llm_enriched" | "local_knowledge_base"
+                            | "local_fallback" }
 
-    Fully local and deterministic — the DMM never calls the network; live
-    region-scoped factors belong to POST /api/calculate-impact.
+    The carbon simulation and ranking are always local + deterministic; the
+    optional v3.6 LLM text layer (free OpenAI-compatible endpoint) rewrites
+    only the three literary fields in child-friendly, country-localized
+    language and degrades seamlessly to the local grid on any failure —
+    this endpoint never 502s. Live region-scoped FACTORS remain
+    POST /api/calculate-impact's concern.
     """
     req = _validated_json(RecommendRequest)
-    result = recommend_for_items([item.model_dump() for item in req.items])
+    result = recommend_for_items(
+        [item.model_dump() for item in req.items], req.country)
     return jsonify(result), 200

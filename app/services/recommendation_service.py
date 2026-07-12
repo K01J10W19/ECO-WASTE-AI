@@ -17,10 +17,23 @@ Each path's net CO2e comes from the carbon engine
 (``carbon_service.estimate_disposal_impact`` — local matrix, credits allowed
 to go NEGATIVE). The SORTING ENGINE then ranks the three outcomes ascending
 (lowest footprint / deepest offset wins): Rank 1 = Optimal green path,
-Rank 3 = worst-case baseline. Every ranked choice is annotated from the
-structured EXPERT KNOWLEDGE base (professional pros/cons per material+method)
-plus a rank-aware encouraging verdict, so the frontend receives prescriptive,
-auditable guidance — not just numbers.
+Rank 3 = worst-case baseline.
+
+TEXT LAYER (v3.6 — "Hyper-Simple & Country-Aware"): the three literary fields
+per path (``encouraging_verdict``, ``environmental_pros``,
+``environmental_cons``) ship in plain, child-friendly language (1-2 punchy
+sentences, <= 25 words, zero jargon):
+
+  * DEFAULT / no LLM key — the local ``EXPERT_KNOWLEDGE`` grid + runtime
+    verdicts below (deterministic; provider ``"local_knowledge_base"``).
+  * LLM key configured — ONE batched call to any OpenAI-compatible
+    chat-completions endpoint (free tiers: Groq / OpenRouter / Gemini compat /
+    local Ollama; see config.py) rewrites the three fields per path,
+    localized to the request's ``country`` (``"global average"`` when absent);
+    provider ``"llm_enriched"``.
+  * ANY LLM failure (auth, rate limit, timeout, malformed output, missing
+    coverage) — seamless, atomic revert to the local grid; provider
+    ``"local_fallback"``. Recommendations can never 502 on the LLM.
 
 Weight resolution mirrors the dual-stage carbon UX (the SHARED
 ``carbon_service.resolve_effective_weight`` helper — the same substitution
@@ -30,15 +43,20 @@ Weight resolution mirrors the dual-stage carbon UX (the SHARED
     (the same PIXEL_AREA_GAMMA calibration the /predict payload uses).
 
 DESIGN GUARANTEES (CLAUDE.md):
-  * Deterministic + 100% offline — the DMM never touches the network, needs
-    no API key, and needs no Flask app context (thread-pool safe). Live
-    region-scoped factors belong to Module 2's audit endpoint, not here.
+  * The NUMERIC core (simulation, ranking, factors) is deterministic + 100%
+    offline and needs no Flask app context (thread-pool safe). The optional
+    LLM text layer is the module's ONLY network touchpoint: it runs once per
+    request in the request thread, may ONLY rewrite the three text fields —
+    never ranks, methods or numbers — and always degrades to the local grid.
   * The 7-class taxonomy stays in lockstep: DISPOSAL_PATHS, the factor
     matrix and EXPERT_KNOWLEDGE cover every material — tests enforce it.
   * Expected failures raise ``ApiError``; nothing 500s silently.
 """
+import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
+
+from flask import current_app, has_app_context
 
 from app.services.carbon_service import (
     estimate_disposal_impact,
@@ -85,202 +103,209 @@ METHOD_DISPLAY_NAMES = {
 STATUS_TAGS = {1: "Optimal", 2: "Acceptable", 3: "Warning"}
 
 # ---------------------------------------------------------------------------
-# STRUCTURED EXPERT KNOWLEDGE BASE.
+# LOCAL EXPERT KNOWLEDGE GRID (v3.6 hyper-simple register).
 #
-# Deep contextual analysis attached to every ranked choice: per
-# (material, method), a professional rationale for WHY the route reduces
-# environmental overhead (pros) and the explicit long-term cost of choosing
-# it (cons). Pure data — deterministic, examiner-auditable, no LLM required.
-# Tests enforce full coverage of every path in DISPOSAL_PATHS.
+# The deterministic fallback copy behind the LLM layer — and the default text
+# when no key is configured. Same constraints as the LLM fields: 1-2 punchy
+# sentences, <= 25 words, plain language a child understands, grounded facts.
+# Tests enforce full coverage of every path in DISPOSAL_PATHS AND the word
+# budget, so fallback and LLM output always share one UX register.
 # ---------------------------------------------------------------------------
 EXPERT_KNOWLEDGE = {
     "plastic": {
         "recycling": {
-            "pros": "Closed-loop recycling displaces virgin polymer production, "
-                    "avoiding the petroleum extraction, cracking and "
-                    "polymerisation that dominate plastic's lifecycle footprint "
-                    "— a net carbon credit per kilogram reclaimed.",
-            "cons": "Polymer chains shorten with every cycle (downcycling), and "
-                    "contaminated or mixed-resin streams are rejected at the "
-                    "MRF and rerouted to residual disposal.",
+            "pros": "Recycling plastic means factories pump less new oil from "
+                    "the ground — a big saving in electricity and dirty air.",
+            "cons": "Plastic gets weaker every time it is recycled, and dirty "
+                    "or mixed plastic gets rejected and dumped instead.",
         },
         "incineration": {
-            "pros": "Energy-from-waste recovers part of plastic's high calorific "
-                    "value (~40 MJ/kg, comparable to fuel oil), displacing some "
-                    "grid generation while destroying the litter pathway.",
-            "cons": "Burning fossil-derived polymers releases their locked "
-                    "petroleum carbon straight to the atmosphere — the "
-                    "highest-GHG route for plastic — and flue-gas residues "
-                    "still require hazardous treatment.",
+            "pros": "Burning plastic makes electricity — one kilogram holds "
+                    "about as much energy as fuel oil.",
+            "cons": "Burning plastic is like burning oil: all its locked-up "
+                    "pollution shoots straight into the sky we breathe.",
         },
         "landfill": {
-            "pros": "Plastic is biologically inert, so a landfilled item "
-                    "generates near-zero direct methane or CO2; its short-term "
-                    "GHG burden is little more than collection logistics.",
-            "cons": "The material persists for 400+ years, fragmenting into "
-                    "microplastics that leach into soil and groundwater, and "
-                    "every buried kilogram permanently forfeits the recycling "
-                    "offset it could have earned.",
+            "pros": "Buried plastic just sits there — it does not rot, so it "
+                    "makes almost no planet-warming gas.",
+            "cons": "It stays buried for 400+ years, crumbling into toxic "
+                    "microplastics that sneak into our water, our fish and "
+                    "our food.",
         },
     },
     "glass": {
         "recycling": {
-            "pros": "Remelting cullet runs the furnace cooler than a virgin "
-                    "batch (no soda-ash/limestone calcination), and glass "
-                    "recycles infinitely with zero quality loss.",
-            "cons": "Colour-mixed or contaminated cullet gets downcycled to "
-                    "aggregate, and glass is heavy — long collection distances "
-                    "erode the transport side of the credit.",
+            "pros": "Old glass melts at a lower heat than glass made from "
+                    "sand — less fuel burned, and it can be reborn forever.",
+            "cons": "Mixed-colour or dirty glass often cannot become new "
+                    "bottles, and heavy glass costs fuel to truck around.",
         },
         "incineration": {
-            "pros": "Practically none — glass is non-combustible; at best it is "
-                    "recovered from bottom ash as a low-grade aggregate.",
-            "cons": "Inert glass absorbs furnace heat without yielding any "
-                    "energy, lowering the plant's efficiency, and exits as slag "
-                    "— the infinite remelt loop is broken for no gain.",
+            "pros": "Almost none — glass cannot burn. At best some bits get "
+                    "scooped from the ashes for road filler.",
+            "cons": "Glass soaks up the fire's heat without giving any energy "
+                    "back, then ends up as waste slag anyway.",
         },
         "landfill": {
-            "pros": "Chemically stable and non-toxic in the ground — no "
-                    "leachate chemistry and no gas generation.",
-            "cons": "Occupies landfill volume essentially forever (glass takes "
-                    "~1 million years to weather), and every buried tonne "
-                    "forfeits the furnace-energy saving of remelting.",
+            "pros": "Glass is clean and safe in the ground — it does not rot, "
+                    "leak or make gas.",
+            "cons": "A buried bottle needs about a million years to "
+                    "disappear, hogging space while new glass is made from "
+                    "scratch.",
         },
     },
     "metal": {
         "recycling": {
-            "pros": "Remelting avoids ore mining and smelting — recycled "
-                    "aluminium needs ~95% less energy than primary production "
-                    "(steel ~70%) — the largest per-kg carbon credit of any "
-                    "household material.",
-            "cons": "Requires clean separation from food residue and "
-                    "composites; repeatedly remelting mixed alloys can "
-                    "downgrade the recovered material's quality.",
+            "pros": "Melting old cans uses up to 95% less electricity than "
+                    "digging and smelting new metal — the biggest energy win "
+                    "there is.",
+            "cons": "Cans need to be fairly clean, and remelting mixed metals "
+                    "again and again can lower their quality.",
         },
         "incineration": {
-            "pros": "Non-combustible metals pass through to bottom ash, from "
-                    "which ferrous fractions are sometimes magnetically "
-                    "recovered as a by-product.",
-            "cons": "Metal contributes no energy to the burn; unrecovered "
-                    "fractions are slagged and oxidised, and the enormous "
-                    "smelting-avoidance credit goes unclaimed.",
+            "pros": "Metal does not burn, but magnets can rescue some of it "
+                    "from the ashes afterwards.",
+            "cons": "It adds no energy to the fire, and most of that precious "
+                    "refined metal is wasted in the slag.",
         },
         "landfill": {
-            "pros": "Structurally stable, and modern lined cells contain the "
-                    "slow corrosion products.",
-            "cons": "Burying refined metal permanently squanders the intense "
-                    "embodied energy of smelting (up to ~9 kg CO2e per kg for "
-                    "aluminium), and trace alloy elements can leach over time.",
+            "pros": "Metal sits fairly quietly in modern lined landfills "
+                    "without causing much trouble.",
+            "cons": "Burying a can throws away all the huge energy spent "
+                    "making it, and slow rust can seep into the soil.",
         },
     },
     "cardboard": {
         "recycling": {
-            "pros": "Repulping corrugated fibre displaces virgin kraft pulping "
-                    "— saving trees, roughly a quarter of the production "
-                    "energy, and the forestry-chain emissions; fibres survive "
-                    "5–7 further cycles.",
-            "cons": "Wet, greasy or wax-coated board (classic pizza-box "
-                    "problem) contaminates the pulp stream and gets rejected "
-                    "into residual waste.",
+            "pros": "Recycled boxes mean fewer trees cut down and about a "
+                    "quarter less factory energy — each box can go around "
+                    "5-7 times.",
+            "cons": "Greasy or wet boxes — the classic pizza box — spoil the "
+                    "whole batch and get tossed out.",
         },
         "incineration": {
-            "pros": "Board is a biogenic fuel: combustion re-releases carbon "
-                    "the tree absorbed, so the net fossil addition is small "
-                    "while heat recovery displaces grid generation.",
-            "cons": "The fibre value is destroyed in a single pass — burning "
-                    "board forfeits 5+ future recycling cycles — and transport "
-                    "plus flue-gas handling still carry a carbon cost.",
+            "pros": "Burning cardboard turns the tree's stored energy into "
+                    "electricity without adding much new pollution.",
+            "cons": "One burn destroys fibres that could have been reused "
+                    "five more times.",
         },
         "landfill": {
-            "pros": "Nothing beyond minimal handling cost and universal "
-                    "availability.",
-            "cons": "Buried cardboard decomposes anaerobically into methane "
-                    "(~28x CO2's warming over a century) — the worst "
-                    "end-of-life for fibre — while the raw material value is "
-                    "lost entirely.",
+            "pros": "Nothing really — it is just the cheapest, laziest "
+                    "option.",
+            "cons": "Rotting buried cardboard burps out methane — a gas that "
+                    "heats the planet about 28 times harder than car fumes.",
         },
     },
     "paper": {
         "recycling": {
-            "pros": "Recycled fibre displaces virgin pulping — the most "
-                    "energy-intensive stage of papermaking — cutting water use "
-                    "by roughly half and the chemical load alongside the "
-                    "carbon credit.",
-            "cons": "Fibres shorten with each loop (~5–7 cycles maximum), and "
-                    "thermal receipts, tissues and laminated papers are "
-                    "non-recyclable contaminants.",
+            "pros": "New paper from old paper skips the most power-hungry "
+                    "factory step and uses about half the water.",
+            "cons": "Paper fibres wear out after 5-7 rounds, and receipts, "
+                    "tissues and shiny paper cannot join in.",
         },
         "incineration": {
-            "pros": "Paper's biogenic carbon makes energy-from-waste roughly "
-                    "carbon-neutral on combustion, with genuine heat and power "
-                    "recovery displacing fossil generation.",
-            "cons": "A one-pass destruction of perfectly reusable fibre, and "
-                    "ink or coating additives concentrate in the ash, which "
-                    "needs managed disposal.",
+            "pros": "Burning paper for electricity is nearly "
+                    "pollution-neutral, because the tree soaked up that "
+                    "carbon while it grew.",
+            "cons": "Perfectly reusable paper is gone in one flash, and the "
+                    "inky ash still needs careful burying.",
         },
         "landfill": {
-            "pros": "Nothing beyond minimal handling logistics.",
-            "cons": "Paper is among the most methane-productive landfill "
-                    "materials: anaerobic decomposition releases CH4 for "
-                    "decades and gas-capture systems recover only part of it.",
+            "pros": "None worth naming — just cheap and easy.",
+            "cons": "Buried paper is a methane machine: it rots for decades, "
+                    "leaking planet-heating gas that capture pipes only "
+                    "partly catch.",
         },
     },
     "biodegradable": {
         "composting": {
-            "pros": "Aerobic composting returns nutrients and stable carbon to "
-                    "soil, displacing synthetic fertiliser production and "
-                    "improving water retention — a genuinely circular pathway "
-                    "for food and garden waste.",
-            "cons": "Poorly managed piles turn anaerobic and emit methane and "
-                    "N2O, and industrial composting needs source-separated "
-                    "feedstock free of plastic contamination.",
+            "pros": "Food scraps become rich soil food, so farms need less "
+                    "factory fertiliser and gardens hold water better.",
+            "cons": "A badly-run pile turns smelly and leaks methane, and "
+                    "plastic bits must be kept out.",
         },
         "anaerobic_digestion": {
-            "pros": "Sealed digesters capture the methane as biogas for heat, "
-                    "power or transport fuel — displacing fossil energy — while "
-                    "the digestate substitutes mineral fertiliser; typically "
-                    "the lowest-carbon organic route.",
-            "cons": "Depends on dedicated infrastructure and consistent "
-                    "feedstock; even a few percent of biogas leakage rapidly "
-                    "erodes the climate benefit.",
+            "pros": "Sealed tanks catch the rot-gas and burn it for "
+                    "electricity, while the leftovers feed farm soil — the "
+                    "greenest food-waste route.",
+            "cons": "It needs special plants nearby, and even small gas leaks "
+                    "quickly shrink the benefit.",
         },
         "landfill": {
-            "pros": "None — this is precisely the pathway organic waste should "
-                    "avoid.",
-            "cons": "Entombed organics decompose anaerobically into landfill "
-                    "methane — the waste sector's single largest GHG source — "
-                    "and even modern capture systems lose a large share of it "
-                    "to the atmosphere.",
+            "pros": "None — this is exactly where food waste should never "
+                    "go.",
+            "cons": "Buried food rots without air and pumps out methane — "
+                    "the single biggest climate problem in our rubbish.",
         },
     },
     "general rubbish": {
         "material_recovery": {
-            "pros": "Mechanical sorting (MRF/MBT) pulls recyclable metals, "
-                    "plastics and fibre back out of the residual stream before "
-                    "disposal, reclaiming offsets that blind landfilling "
-                    "forfeits.",
-            "cons": "Sorting plants are energy-intensive and recovery rates on "
-                    "contaminated mixed waste stay modest — source separation "
-                    "upstream remains far superior.",
+            "pros": "Sorting machines rescue metals, plastics and paper out "
+                    "of mixed rubbish before dumping — a last-chance save.",
+            "cons": "The machines use lots of power and only save a small "
+                    "slice — sorting at home works far better.",
         },
         "incineration": {
-            "pros": "Energy-from-waste shrinks residual volume by ~90% and "
-                    "recovers heat and electricity, displacing landfill "
-                    "methane and some grid generation.",
-            "cons": "The stream's fossil fraction (plastics) burns straight to "
-                    "CO2, and toxic fly ash must be stabilised in dedicated "
-                    "hazardous cells.",
+            "pros": "Burning mixed rubbish shrinks it by 90% and makes "
+                    "electricity instead of landfill gas.",
+            "cons": "The plastic inside burns into sky pollution, and the "
+                    "leftover toxic ash needs special burial.",
         },
         "landfill": {
-            "pros": "The lowest immediate processing cost and universally "
-                    "available.",
-            "cons": "The organic fraction generates decades of methane, "
-                    "leachate must be pumped and treated long after closure, "
-                    "and the land is permanently committed — the worst-case "
-                    "baseline for mixed waste.",
+            "pros": "The cheapest option, available everywhere.",
+            "cons": "It leaks methane for decades, its dirty juice must be "
+                    "pumped away for years, and the land is lost forever.",
         },
     },
 }
+
+# ---------------------------------------------------------------------------
+# v3.6 LLM GENERATION PIPELINE ("Hyper-Simple & Country-Aware").
+#
+# One batched call per request to an OpenAI-compatible chat-completions
+# endpoint (LLM_API_URL/LLM_API_KEY/LLM_MODEL in config — free tiers work:
+# Groq, OpenRouter, Gemini's compat endpoint, or a fully local Ollama).
+# The LLM may ONLY write the three literary fields; every number, rank and
+# method id is computed locally and passed in read-only.
+# ---------------------------------------------------------------------------
+_LLM_TIMEOUT_S = 30
+_LLM_MAX_TOKENS = 4096
+_LLM_TEMPERATURE = 0.5
+
+LLM_SYSTEM_PROMPT = """\
+You are the friendly, plain-spoken voice of a family waste-sorting app.
+You rewrite disposal advice so a 10-year-old instantly gets it.
+
+You receive JSON: a "country" plus scanned waste "items". Each item has an
+"index", a "material", its "weight_kg", and exactly 3 end-of-life "paths".
+Each path gives: "method", "rank" (1 = best, 3 = worst), "status_tag",
+"carbon_impact_kg" (negative = it REMOVES pollution), "saving_vs_worst_kg"
+and "extra_vs_best_kg".
+
+For EVERY path of EVERY item write exactly three fields:
+1. "encouraging_verdict" — celebrate rank 1, gently nudge rank 2, sternly
+   warn rank 3. MUST weave in the numbers provided (kg and/or rank).
+2. "environmental_pros" — the immediate, everyday benefit of this choice.
+3. "environmental_cons" — a stark but 100% truthful long-term consequence.
+
+HARD RULES
+- 1-2 punchy sentences per field. MAXIMUM 25 words per field.
+- Words a child knows. NEVER use jargon like "carbon-negative", "offset",
+  "displace", "biogenic", "anaerobic decomposition", "leachate", "CO2e",
+  "emission factor". Prefer everyday images: "planet-warming gas",
+  "saving electricity", "trash on our beaches", "burning coal".
+- Use ONLY the numbers provided — never invent or change them.
+- If "country" is a real country code, ground pros/cons in that country's
+  everyday reality (its beaches and oceans if coastal, its crowded
+  landfills, its power grid). If "country" is "global average", keep the
+  text universal.
+- Reply with STRICT JSON ONLY — no markdown, no commentary — shaped:
+  {"items":[{"index":0,"paths":[{"method":"recycling",
+  "encouraging_verdict":"...","environmental_pros":"...",
+  "environmental_cons":"..."}]}]}
+  Cover every item and every path exactly once, keeping the given
+  "method" ids and "index" values unchanged.
+"""
 
 
 def _display_material(material: str) -> str:
@@ -292,32 +317,33 @@ def _build_verdict(rank: int, material: str, method: str,
                    co2e_kg: float, best_co2e_kg: float,
                    worst_co2e_kg: float) -> str:
     """
-    Rank-aware supportive copy for one simulated path.
+    Local rank-aware verdict (v3.6 hyper-simple register, <= 25 words).
 
     Composed at runtime from the SORTED outcome (never hand-tied to a rank)
-    so a future factor recalibration can reshuffle the ranking without the
-    tone drifting out of sync with the numbers.
+    so a factor recalibration can reshuffle ranks without the tone drifting
+    out of sync with the numbers. This is the deterministic fallback copy;
+    the LLM layer, when active, replaces it with localized text.
     """
-    mat = _display_material(material)
+    mat = _display_material(material).lower()
     meth = METHOD_DISPLAY_NAMES.get(method, method.replace("_", " ").title())
     saving_vs_worst = round(worst_co2e_kg - co2e_kg, 4)
-    penalty_vs_best = round(co2e_kg - best_co2e_kg, 4)
+    extra_vs_best = round(co2e_kg - best_co2e_kg, 4)
 
     if rank == 1:
-        offset = (" — it is carbon-NEGATIVE, offsetting more emissions than it "
-                  "creates" if co2e_kg < 0 else "")
-        return (f"Optimal green path! {meth} is the lowest-carbon fate for "
-                f"{mat}{offset}. Choosing it avoids {saving_vs_worst} kg CO2e "
-                f"versus the worst route here — outstanding work for the planet.")
+        if co2e_kg < 0:
+            return (f"Best choice! {meth} actually removes pollution for "
+                    f"{mat} and dodges {saving_vs_worst} kg of planet-warming "
+                    f"gas versus the worst route. Brilliant!")
+        return (f"Best choice! {meth} is the cleanest fate for {mat}, "
+                f"dodging {saving_vs_worst} kg of planet-warming gas. "
+                f"Brilliant!")
     if rank == 2:
-        return (f"Acceptable fallback. {meth} lands mid-table for {mat}: it "
-                f"still avoids {saving_vs_worst} kg CO2e versus the worst "
-                f"route, but the rank-1 path is the greener call whenever it "
-                f"is available to you.")
-    return (f"Warning: {meth} is the highest-carbon fate for {mat} in this "
-            f"comparison, adding {penalty_vs_best} kg CO2e over the optimal "
-            f"path. Please choose a higher-ranked route whenever local "
-            f"facilities allow.")
+        return (f"Not bad — {meth} beats the worst option by "
+                f"{saving_vs_worst} kg of pollution, but the number-1 choice "
+                f"is kinder to the planet.")
+    return (f"Careful! {meth} is the dirtiest route for {mat} — "
+            f"{extra_vs_best} kg MORE planet-warming gas than the best "
+            f"choice. Pick better if you can!")
 
 
 def simulate_disposal_paths(material: str, weight_kg: float, _pool=None) -> list:
@@ -336,14 +362,16 @@ def simulate_disposal_paths(material: str, weight_kg: float, _pool=None) -> list
             "carbon_factor_kg_per_kg": -1.08,  # net factor (negative = credit)
             "carbon_impact_kg": -0.54,       # factor x weight (may be negative)
             "encouraging_verdict": "...",    # rank-aware supportive copy
-            "environmental_pros": "...",     # knowledge base rationale
-            "environmental_cons": "..."      # knowledge base long-term costs
+            "environmental_pros": "...",     # knowledge grid benefit
+            "environmental_cons": "..."      # knowledge grid long-term cost
           },
           ... rank 2, rank 3 ...
         ]
 
-    Ties (which the current matrix never produces) fall back to method-name
-    order so the ranking stays fully deterministic.
+    Text fields carry the LOCAL knowledge-grid copy; the LLM layer in
+    ``recommend_for_items`` may overwrite them (text only — numbers, ranks
+    and method ids are immutable). Ties (which the current matrix never
+    produces) fall back to method-name order so ranking stays deterministic.
     """
     if material not in MATERIAL_CLASSES:
         raise ApiError(
@@ -389,13 +417,116 @@ def simulate_disposal_paths(material: str, weight_kg: float, _pool=None) -> list
     return ranked
 
 
-def recommend_for_items(items: list) -> dict:
+def _llm_settings() -> tuple:
+    """(api_key, model, api_url) from config; blanks outside an app context."""
+    if not has_app_context():
+        return "", "", ""
+    cfg = current_app.config
+    return (str(cfg.get("LLM_API_KEY", "") or ""),
+            str(cfg.get("LLM_MODEL", "") or ""),
+            str(cfg.get("LLM_API_URL", "") or ""))
+
+
+def _llm_context(results: list, country: str) -> dict:
+    """The read-only numeric context the LLM writes prose around."""
+    return {
+        "country": country or "global average",
+        "items": [
+            {
+                "index": idx,
+                "material": item["display_name"],
+                "weight_kg": item["effective_weight_kg"],
+                "paths": [
+                    {
+                        "method": path["method"],
+                        "rank": path["rank"],
+                        "status_tag": path["status_tag"],
+                        "carbon_impact_kg": path["carbon_impact_kg"],
+                        "saving_vs_worst_kg": round(
+                            item["recommendations"][-1]["carbon_impact_kg"]
+                            - path["carbon_impact_kg"], 4),
+                        "extra_vs_best_kg": round(
+                            path["carbon_impact_kg"]
+                            - item["recommendations"][0]["carbon_impact_kg"], 4),
+                    }
+                    for path in item["recommendations"]
+                ],
+            }
+            for idx, item in enumerate(results)
+        ],
+    }
+
+
+def _extract_json(text: str) -> dict:
+    """
+    Parse the LLM reply leniently: tolerate stray prose or markdown fences by
+    slicing from the first '{' to the last '}'. Anything unparseable raises
+    (caught upstream -> local_fallback).
+    """
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        raise ValueError("no JSON object in LLM reply")
+    return json.loads(text[start:end + 1])
+
+
+def _enrich_with_llm(results: list, country: str,
+                     api_key: str, model: str, api_url: str) -> None:
+    """
+    Rewrite the three literary fields of every ranked path via ONE batched
+    chat-completions call. Raises on ANY problem (HTTP status, timeout,
+    malformed JSON, missing item/path coverage, empty field) — the caller
+    catches and serves the local grid instead. Replacements are STAGED and
+    applied atomically, so a mid-validation failure never leaves the payload
+    half-enriched.
+    """
+    import requests  # local import keeps module import light for tests
+
+    body = {
+        "model": model,
+        "temperature": _LLM_TEMPERATURE,
+        "max_tokens": _LLM_MAX_TOKENS,
+        "messages": [
+            {"role": "system", "content": LLM_SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(_llm_context(results, country))},
+        ],
+    }
+    resp = requests.post(
+        api_url,
+        json=body,
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=_LLM_TIMEOUT_S,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"LLM endpoint returned HTTP {resp.status_code}")
+
+    generated = _extract_json(resp.json()["choices"][0]["message"]["content"])
+    by_index = {int(item["index"]): item for item in generated["items"]}
+
+    staged = []
+    for idx, item in enumerate(results):
+        by_method = {p["method"]: p for p in by_index[idx]["paths"]}
+        for path in item["recommendations"]:
+            gen = by_method[path["method"]]   # KeyError -> fallback upstream
+            for field in ("encouraging_verdict", "environmental_pros",
+                          "environmental_cons"):
+                value = str(gen[field]).strip()
+                if not value:
+                    raise ValueError(f"LLM returned an empty '{field}'")
+                staged.append((path, field, value))
+    for path, field, value in staged:        # atomic: only after FULL validation
+        path[field] = value
+
+
+def recommend_for_items(items: list, country: str = None) -> dict:
     """
     DMM aggregate entry for ``POST /api/recommend``.
 
     ``items`` is a list of ``{"material": str, "weight_kg": float?,
     "box_area_px": float?}`` dicts (type-validated by the pydantic schema at
-    the route; each needs at least one of the two size fields). Returns::
+    the route; each needs at least one of the two size fields). ``country``
+    (optional ISO alpha-2, typically the frontend's IP-geolocated default)
+    only flavours the v3.6 LLM text layer — the numbers stay identical.
+    Returns::
 
         {
           "items": [
@@ -404,12 +535,16 @@ def recommend_for_items(items: list) -> dict:
           ],
           "summary": { item_count, optimal_total_co2e_kg,
                        worst_total_co2e_kg, max_saving_kg },
-          "provider": "local_knowledge_base"
+          "country": "MY" | None,
+          "provider": "llm_enriched" | "local_knowledge_base" | "local_fallback"
         }
 
-    The summary totals compare "user follows every rank-1 path" against
-    "user follows every rank-3 path" — the headline saving the Step-7
-    dashboard can celebrate. Totals may be NEGATIVE (net offsets).
+    Provider semantics: ``llm_enriched`` = the batched LLM call rewrote the
+    text fields; ``local_knowledge_base`` = no LLM key configured (the
+    deterministic default); ``local_fallback`` = an LLM was configured but
+    failed (rate limit, timeout, bad output) and the local grid took over
+    seamlessly. The summary compares "user follows every rank-1 path"
+    against "every rank-3 path" — totals may be NEGATIVE (net offsets).
     """
     results = []
     optimal_total = 0.0
@@ -435,6 +570,20 @@ def recommend_for_items(items: list) -> dict:
                 "recommendations": ranked,
             })
 
+    country_code = country.upper() if country else None
+
+    # v3.6 text layer: LLM rewrite when configured, seamless local fallback.
+    provider = "local_knowledge_base"
+    api_key, model, api_url = _llm_settings()
+    if api_key and model and api_url:
+        try:
+            _enrich_with_llm(results, country_code, api_key, model, api_url)
+            provider = "llm_enriched"
+        except Exception as exc:  # noqa: BLE001 - ANY LLM issue degrades gracefully
+            logger.warning("LLM text layer failed (%s); serving the local "
+                           "knowledge-base copy instead.", exc)
+            provider = "local_fallback"
+
     return {
         "items": results,
         "summary": {
@@ -443,5 +592,6 @@ def recommend_for_items(items: list) -> dict:
             "worst_total_co2e_kg": round(worst_total, 4),
             "max_saving_kg": round(worst_total - optimal_total, 4),
         },
-        "provider": "local_knowledge_base",
+        "country": country_code,
+        "provider": provider,
     }
