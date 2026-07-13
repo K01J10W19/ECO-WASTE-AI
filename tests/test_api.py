@@ -10,6 +10,10 @@ def test_health(client):
 def test_index_page(client):
     res = client.get("/")
     assert res.status_code == 200
+    # The Step-7 SPA contract: canvas + all three JSON endpoints wired + GSAP.
+    for marker in (b"detection-canvas", b"/api/predict",
+                   b"/api/calculate-impact", b"/api/recommend", b"gsap"):
+        assert marker in res.data, marker
 
 
 def test_carbon_lab_page(client):

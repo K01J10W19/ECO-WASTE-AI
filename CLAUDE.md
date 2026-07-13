@@ -175,10 +175,12 @@ Upload (multipart image)
                      physics{laplacian_variance, edge_density, plasticity_index,
                      tiebreak_applied}, carbon_factor_kg_per_kg, estimated_carbon_kg }
           image: { width, height (+ filename, url added by the route) }
-  → Frontend: canvas BOUNDING-BOX overlay (ctx.strokeRect borders + light
-    interior tint, rectangular hit-testing, smallest box wins on overlap);
-    hover/click a box (or list row) → inspector with the ViT score bars +
-    the ψ physics readout + the carbon formula; raw JSON panel
+  → Frontend (CarbIQ SPA, Step 7): canvas BOUNDING-BOX overlay
+    (ctx.strokeRect + corner ticks + label chips, rectangular hit-testing,
+    smallest box wins on overlap, CO2e-tiered colouring) linked 1:1 to the
+    editable item-card grid via the echoed ids (bi-directional focus);
+    cards carry ψ/box diagnostics, weight inputs (debounced re-audit) and
+    the ranked DMM tab panel
 
 Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
   → POST /api/calculate-impact  {items:[{id?, material,
@@ -235,7 +237,7 @@ Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
 | Recommendation engine | **Decision Making Module (DMM)** — rule-based 3-path parallel carbon simulation + ascending-CO2e ranking (`recommendation_service.py`); numbers are ALWAYS local | Deterministic engine is the gradeable default; must work fully with no LLM key. |
 | DMM text layer (v3.6) | **Child-Friendly, Country-Localized LLM Generation Pipeline** — one batched strict-JSON call to any free OpenAI-compatible endpoint (`LLM_API_URL`/`LLM_MODEL`, Groq default) rewrites ONLY verdict/pros/cons (1–2 sentences, ≤25 words, zero jargon, localized to `country`); local `EXPERT_KNOWLEDGE` grid (same hyper-simple register) is the default and the atomic fallback | Free-tier friendly, provider-agnostic, zero new deps (`requests`); any LLM failure degrades to `local_fallback` — recommendations never 502. |
 | Backend | **Flask** (app factory + blueprints + services) | Thin controllers, logic in services. |
-| Frontend | HTML5 + Tailwind CSS + native JS (ES6+, Fetch API) + GSAP | SPA. Current interim page is a vanilla "Test Brain" tester with a classic bounding-box overlay + inspector; polished UI is Step 7. |
+| Frontend | HTML5 + Tailwind (CDN) + vanilla JS (ES6+, Fetch) + GSAP 3 (CDN); Inter/JetBrains Mono self-hosted under `app/static/assets/` | **CarbIQ SPA (Step 7, live)** — design-compiled dashboard: detection canvas ↔ item grid synced via echoed ids, IP-geolocated country select, dual-stage carbon telemetry, ranked DMM panels; `/carbon-lab` stays as the dependency-free API tester. |
 | Database | SQLite (optional, for scan history) | Lightweight, local, file-based. |
 
 ---
@@ -254,7 +256,7 @@ Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
   (`opencv-python-headless` — Method B: Laplacian variance + Canny edge density
   → Plasticity Index ψ), NumPy
 - **Backend:** Flask 3, Flask-SQLAlchemy, python-dotenv, requests, pydantic
-- **Frontend:** HTML5, Tailwind CSS, vanilla JavaScript (Fetch API), GSAP (Step 7); interim test page is dependency-free vanilla HTML/CSS/JS (Canvas 2D `strokeRect` bounding-box rendering)
+- **Frontend:** HTML5, Tailwind CSS (CDN), vanilla JavaScript (Fetch API), GSAP 3 (CDN) — the CarbIQ SPA (Canvas 2D `strokeRect` box rendering, self-hosted Inter/JetBrains Mono); `/carbon-lab` API tester stays dependency-free
 - **Database:** SQLite (via SQLAlchemy)
 - **External APIs:** Climatiq (carbon, Step 5) — Carbon Interface kept as alternate adapter
 - **Optional:** any free OpenAI-compatible LLM endpoint (Groq / OpenRouter / Gemini compat / local Ollama) for the v3.6 DMM text layer — plain `requests`, no SDK
@@ -287,8 +289,8 @@ waste-detection-app/
 │   ├── models/scan.py     # SQLite model for optional scan history
 │   ├── schemas/           # pydantic contracts: detection.py, carbon.py, recommendation.py
 │   ├── utils/errors.py    # ApiError + register_error_handlers()
-│   ├── static/            # css/ js/ uploads/
-│   └── templates/index.html   # "Test Brain" tester page (full SPA in Step 7)
+│   ├── static/            # uploads/ + assets/ (self-hosted woff2 fonts)
+│   └── templates/         # index.html (CarbIQ SPA) · carbon_lab.html (API tester)
 ├── ml/                   # LEGACY training workspace — KEEP, DO NOT DELETE (FYP report)
 ├── models/               # legacy exported weights location (best.pt, gitignored)
 ├── tests/
@@ -517,26 +519,38 @@ Rules:
   the 400-year microplastic caveat the number cannot see (report talking
   point).
 
-### Module 4 — Web Application
-- **Current interim page (`templates/index.html`):** the "Dual-Tower Test Brain" —
-  drag-drop/file-picker upload, instant local preview, **Analyze** button, Stage-1
-  threshold slider, **classic bounding-box canvas overlay** (`ctx.strokeRect` with
-  crisp semi-transparent per-material borders + a very light interior tint,
-  rectangular hover/click hit-testing, smallest box wins on overlap, label chips
-  over the top-left corner), and an **interactive inspector**: when analysis
-  completes the most confident item is auto-pinned showing its 7-class ViT score
-  bars, the box pixel area, the Method B physics readout (ψ, wrinkle variance,
-  edge density, and whether the tie-break corrected the ranking), and the full
-  carbon formula readout (base × area ÷ γ); hovering or clicking any box (or list
-  row) walks the other items. Raw JSON panel below. Vanilla HTML/CSS/JS, zero
-  dependencies.
-- **Step 7:** the polished SPA — Tailwind layout, GSAP transitions, and the
-  **split-screen interactive grid**: image bounding boxes linked 1:1 to an
-  editable item-list grid via the echoed item `id`s (bi-directional focus
-  tracking, no canvas-overlay editing), per-item weight inputs, a country
-  selector pre-populated by a lightweight IP-geolocation lookup at page init
-  (the geolocated code rides `country` into `/api/calculate-impact`), carbon
-  dashboard, DMM recommendation list.
+### Module 4 — Web Application: the CarbIQ SPA — DONE (Step 7)
+- **`templates/index.html` — the CarbIQ dashboard** (a design-tool layout
+  compiled to dependency-light vanilla JS: Tailwind CDN + GSAP 3 CDN + Fetch,
+  fonts self-hosted from `app/static/assets/`; no template runtime):
+  - **Upload:** drag-drop, file picker, or live **camera capture**
+    (getUserMedia → canvas → File) → `POST /api/predict`; the user's own
+    pixels render immediately while the towers run.
+  - **Detection canvas:** letterboxed contain-fit with blueprint grid;
+    bounding boxes with corner ticks + JetBrains-Mono label chips, coloured
+    by per-item CO2e tier (teal / amber ≥0.12 kg / rose ≥0.24 kg); GSAP
+    draw-in sweep; hover cursor + click hit-testing (smallest box wins).
+  - **Split-screen grid sync:** every canvas box links 1:1 to an editable
+    item card via the echoed `id` — clicking either side focuses both
+    (`.active-item` ring ↔ heavier stroke + tint), with smooth scroll-to.
+  - **Dual-stage carbon UX:** cards prefill the Stage-A γ proxy, then
+    `POST /api/calculate-impact` (country + ids) swaps in audited factors —
+    weight edits are debounced (650 ms) into re-audits; the card label
+    flips `proxy → verified`, and the factor line shows
+    `factor · source · weight_source`.
+  - **DMM panel per card:** `POST /api/recommend` fills the 3 ranked
+    process tabs (rank-numbered labels, Optimal/Acceptable/Warning chips,
+    per-path CO2e) + the child-simple verdict and pros/cons; the section
+    header shows the text provider (`llm_enriched` / fallback).
+  - **Telemetry:** GSAP-tweened total CO2e counter, petrol-km equivalence,
+    provider label, item/mass/recyclable-share stats, ELEVATED/LOW impact
+    chip; **geo badge + country select** pre-populated by an IP-geolocation
+    lookup (ipapi.co, 4 s timeout, silent MY fallback) — manual changes flip
+    AUTO-GEO → OVERRIDE and re-run audit + recommendations.
+  - **Resilience:** every fetch failure lands in a GSAP toast + status pill;
+    the numbers degrade to the Stage-A proxy, never a blank screen.
+- **`templates/carbon_lab.html` (`/carbon-lab`):** retained dependency-free
+  API tester for Modules 2+3 (request/response JSON panels).
 
 ---
 
@@ -642,17 +656,18 @@ Each completed step gets its own commit + push — see §13 for the commit conve
 | 4.11 | DETECTION REGRESSION: specialist waste OBJECT DETECTOR (yolov8n-waste-det.pt, blended corpus) replaces segmentation as Stage 1 — box-area carbon proxy with γ recalibrated 5000→8000, classic strokeRect frontend, cleaner background rejection, nano-speed edge throughput; Method B + ViT unchanged | **DONE** |
 | 5 | Carbon module — live Climatiq factors (cached 1-kg probes per (material, country, api_key), region-scoped) with local-dummy fallback + `POST /api/calculate-impact` (pydantic-validated weights/country, per-item + total CO2e, provider labelling) — the v3.5 **dual-stage carbon UX** (Stage A blind γ proxy / Stage B precision audit) | **DONE** |
 | 6 | DECISION MAKING MODULE (v3.5): 3-path parallel end-of-life carbon simulation (taxonomy-branched: dry recyclables / organics / residual), ascending-CO2e sorting & ranking core (Optimal / Acceptable / Warning), 7×3 disposal-factor matrix with negative offset credits, structured expert knowledge base (pros/cons) + rank-aware verdicts, `POST /api/recommend` (audited weight or box-area proxy) | **DONE** |
-| 6.5 | **v3.6 DMM TEXT LAYER: Child-Friendly, Country-Localized LLM Generation Pipeline — hyper-simple system prompt (≤25 words/field, jargon banlist, numbers woven in), one batched strict-JSON call to a free OpenAI-compatible endpoint (Groq default; OpenRouter/Gemini/Ollama), `country` context injection with "global average" default, atomic staged application, seamless `local_fallback` on any failure, knowledge grid rewritten to the same simple register** | **DONE (this step)** |
-| 7 | Frontend — full SPA: Tailwind/GSAP, weight forms, results dashboard | **Next** |
-| 8 | Full test suite, gunicorn deployment guide, FYP documentation | Pending |
+| 6.5 | v3.6 DMM TEXT LAYER: Child-Friendly, Country-Localized LLM Generation Pipeline — hyper-simple system prompt (≤25 words/field, jargon banlist, numbers woven in), one batched strict-JSON call to a free OpenAI-compatible endpoint (Groq default; OpenRouter/Gemini/Ollama), `country` context injection with "global average" default, atomic staged application, seamless `local_fallback` on any failure, knowledge grid rewritten to the same simple register | **DONE** |
+| 7 | **CarbIQ SPA frontend — design-compiled Tailwind/GSAP dashboard: canvas↔grid id-synced split-screen, camera capture, IP-geolocated country defaulting, editable weights driving debounced Stage-B audits + DMM refresh, ranked process tabs, animated telemetry, self-hosted fonts** | **DONE (this step)** |
+| 8 | Full test suite, gunicorn deployment guide, FYP documentation | **Next** |
 
-**Deliverables checklist:** multi-object upload ✓ · auto bounding boxes ✓ ·
-per-item confidence (both towers) ✓ · per-item material evidence (ViT bars) ✓ ·
-size-aware carbon estimates (box-area scaling) ✓ · real-time carbon API with
-country scoping + fallback ✓ · total + per-item CO2e (API) ✓ · structured
-disposal instructions ✓ (DMM: ranked 3-path prescriptions with expert
-commentary, API) · per-item weight inputs (Step 7 UI) · polished
-responsive UI (Step 7).
+**Deliverables checklist — ALL CORE ITEMS COMPLETE:** multi-object upload ✓ ·
+auto bounding boxes ✓ · per-item confidence (both towers) ✓ · per-item
+material evidence ✓ · size-aware carbon estimates (box-area scaling) ✓ ·
+real-time carbon API with country scoping + fallback ✓ · total + per-item
+CO2e ✓ · structured disposal instructions ✓ (DMM: ranked 3-path
+prescriptions with expert commentary) · per-item weight inputs ✓ (debounced
+Stage-B re-audit) · polished responsive UI ✓ (CarbIQ SPA). Remaining: Step 8
+hardening + FYP documentation.
 
 ---
 

@@ -1,403 +1,1303 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Dual-Tower Test Brain — Waste Detection + TrashNet ViT</title>
-  <style>
-    :root { --bg:#0f172a; --card:#1e293b; --muted:#94a3b8; --fg:#e2e8f0; --accent:#38bdf8; --ok:#34d399; }
-    * { box-sizing: border-box; }
-    body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg); }
-    .wrap { max-width: 1000px; margin: 0 auto; padding: 24px 16px 64px; }
-    h1 { font-size: 1.4rem; margin: 8px 0 2px; }
-    .sub { color: var(--muted); margin: 0 0 20px; font-size: .9rem; }
-
-    /* Upload zone */
-    #drop {
-      border: 2px dashed #334155; border-radius: 12px; padding: 32px 20px; text-align:center;
-      cursor: pointer; transition: border-color .15s, background .15s; background: var(--card);
-    }
-    #drop.hover { border-color: var(--accent); background:#243149; }
-    #drop p { margin: 6px 0; color: var(--muted); }
-    #drop strong { color: var(--fg); }
-
-    /* Controls */
-    .controls { margin: 16px 0; display:flex; flex-wrap:wrap; align-items:center; gap:14px; }
-    #analyze {
-      background: var(--accent); color:#0b1220; border:0; border-radius:10px;
-      font: 700 .95rem system-ui, sans-serif; padding: 10px 22px; cursor:pointer;
-      transition: opacity .15s, transform .05s;
-    }
-    #analyze:disabled { opacity:.35; cursor:not-allowed; }
-    #analyze:not(:disabled):active { transform: scale(.97); }
-    .conf-box { flex:1; min-width: 220px; display:flex; flex-direction:column; gap:4px; }
-    .conf-box input[type=range] { width:100%; accent-color: var(--accent); }
-    .hint { color:#64748b; font-size:.78rem; }
-
-    #status { margin: 4px 0 12px; min-height: 1.2em; font-size:.92rem; }
-    #status.error { color:#f87171; }
-
-    /* Canvas + inspector layout */
-    .layout { display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap; }
-    .canvas-col { flex: 1 1 480px; min-width: 300px; }
-    canvas, #preview { display:block; max-width:100%; height:auto; border-radius:10px; background:#000; }
-    canvas { cursor: default; }
-
-    /* Inspector panel (Stage-2 evidence + carbon math for the hovered/clicked item) */
-    #inspector {
-      flex: 0 1 300px; min-width: 260px; background: var(--card);
-      border: 1px solid #24324a; border-radius: 12px; padding: 14px 16px; display:none;
-    }
-    #inspector h3 { margin: 0 0 2px; font-size: 1.02rem; display:flex; align-items:center; gap:8px; }
-    #inspector .meta { color: var(--muted); font-size:.8rem; margin-bottom: 10px; }
-    .bar-row { display:flex; align-items:center; gap:8px; margin: 5px 0; font-size:.8rem; }
-    .bar-label { flex: 0 0 108px; color: var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .bar-track { flex:1; height: 10px; background:#0b1220; border-radius:5px; overflow:hidden; }
-    .bar-fill { height:100%; border-radius:5px; }
-    .bar-pct { flex: 0 0 44px; text-align:right; color: var(--fg); font-variant-numeric: tabular-nums; }
-    .carbon-line {
-      margin-top: 12px; padding-top: 10px; border-top: 1px solid #24324a;
-      color: var(--ok); font-size: .88rem;
-    }
-    .carbon-line small { display:block; color:#64748b; margin-top:2px; }
-    .inspector-empty { color:#64748b; font-size:.85rem; }
-
-    /* Item list */
-    ul#items { list-style:none; padding:0; margin:16px 0 0; }
-    ul#items li {
-      display:flex; align-items:center; gap:8px; padding:7px 8px; border-bottom:1px solid #24324a;
-      flex-wrap:wrap; cursor:pointer; border-radius:8px; transition: background .1s;
-    }
-    ul#items li:hover, ul#items li.active { background:#243149; }
-    .dot { width:12px; height:12px; border-radius:3px; display:inline-block; flex:0 0 auto; }
-    .boxconf { color:#64748b; font-size:.78rem; }
-    .carbon { color:var(--ok); font-size:.85rem; margin-left:auto; }
-
-    /* Raw JSON panel */
-    h2 { font-size:1rem; margin:28px 0 8px; color:var(--muted); }
-    pre#json {
-      background:#0b1220; border:1px solid #24324a; border-radius:10px; padding:14px;
-      font: .8rem/1.5 ui-monospace, Consolas, monospace; color:#a5f3fc;
-      overflow-x:auto; white-space:pre; max-height: 420px; overflow-y:auto; display:none;
-    }
-    .note { margin-top:40px; color:#64748b; font-size:.8rem; border-top:1px solid #24324a; padding-top:12px; }
-    code { background:#0b1220; padding:1px 5px; border-radius:4px; }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CarbIQ — Multi-Target Waste Detection &amp; Carbon Impact</title>
+<style>/* cyrillic-ext */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/assets/a68eae03-5dc.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/assets/68c68c27-fce.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/assets/0f1c203f-fae.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/assets/65e24575-971.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/assets/409ac3ab-db0.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/assets/a75b6b4c-9b0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/assets/63b39b68-fe9.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/assets/a68eae03-5dc.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/assets/68c68c27-fce.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/assets/0f1c203f-fae.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/assets/65e24575-971.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/assets/409ac3ab-db0.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/assets/a75b6b4c-9b0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/assets/63b39b68-fe9.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/assets/a68eae03-5dc.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/assets/68c68c27-fce.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/assets/0f1c203f-fae.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/assets/65e24575-971.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/assets/409ac3ab-db0.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/assets/a75b6b4c-9b0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/assets/63b39b68-fe9.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/static/assets/a68eae03-5dc.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/static/assets/68c68c27-fce.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/static/assets/0f1c203f-fae.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/static/assets/65e24575-971.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/static/assets/409ac3ab-db0.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/static/assets/a75b6b4c-9b0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/static/assets/63b39b68-fe9.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url("/static/assets/a68eae03-5dc.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url("/static/assets/68c68c27-fce.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url("/static/assets/0f1c203f-fae.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url("/static/assets/65e24575-971.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url("/static/assets/409ac3ab-db0.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url("/static/assets/a75b6b4c-9b0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url("/static/assets/63b39b68-fe9.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/assets/eae25fca-333.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/assets/53265b68-065.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/assets/643daf10-c95.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/assets/5240e9a1-745.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/assets/7cf1d362-083.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/assets/4a3041bd-5cf.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/assets/eae25fca-333.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/assets/53265b68-065.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/assets/643daf10-c95.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/assets/5240e9a1-745.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/assets/7cf1d362-083.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/assets/4a3041bd-5cf.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/assets/eae25fca-333.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/assets/53265b68-065.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/assets/643daf10-c95.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/assets/5240e9a1-745.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/assets/7cf1d362-083.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/assets/4a3041bd-5cf.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+</style>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #fafafa; }
+  body { font-family: 'Inter', -apple-system, ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  a { color: #0d9488; text-decoration: none; }
+  a:hover { color: #0f766e; }
+  .font-mono-d { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #e4e4e7; border-radius: 8px; }
+  ::-webkit-scrollbar-thumb:hover { background: #d4d4d8; }
+  select option { background: #ffffff; color: #18181b; }
+  /* Bi-directional focus state — mirrored by canvas bounding boxes */
+  .active-item {
+    border-color: rgba(20, 184, 166, 0.7) !important;
+    background: linear-gradient(150deg, rgba(20, 184, 166, 0.05), #ffffff 55%) !important;
+    box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.12);
+  }
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(20,184,166,0.45); }
+    50% { opacity: 0.65; box-shadow: 0 0 0 5px rgba(20,184,166,0); }
+  }
+  .pulse-dot { animation: pulse-dot 2.2s ease-in-out infinite; }
+  /* GSAP orchestration hooks */
+  .gsap-root, .gsap-panel-left, .gsap-panel-right, .gsap-telemetry, .gsap-card, .gsap-stagger-item, .gsap-badge { will-change: transform, opacity; }
+</style>
 </head>
 <body>
-  <div class="wrap">
-    <h1>🧠 Dual-Tower Test Brain</h1>
-    <p class="sub"><strong>Stage 1</strong> a specialized waste detector (blended universal waste corpus)
-      boxes ONLY trash-like objects — background furniture/floors rarely fire →
-      square padding + <strong>Method B</strong> physics (Laplacian wrinkles + Canny edges → ψ) →
-      <strong>Stage 2</strong> TrashNet ViT names the material; ψ breaks ambiguous plastic-vs-glass calls.
-      Bounding-box pixel area scales each carbon estimate. Hover or click a box to inspect.</p>
 
-    <!-- 1) Upload zone: click or drag & drop -->
-    <div id="drop">
-      <p><strong>Click to choose an image</strong> or drag &amp; drop it here</p>
-      <p>PNG / JPG / WEBP · max 10 MB</p>
-      <input id="file" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+<div class="h-auto md:h-screen w-full md:overflow-hidden flex flex-col bg-zinc-50 text-zinc-900 gsap-root" style="font-family:'Inter',-apple-system,ui-sans-serif,system-ui,sans-serif">
+
+  <!-- ============ TOP GLOBAL HEADER ============ -->
+  <header class="shrink-0 flex items-center justify-between px-8 py-4 bg-white border-b border-zinc-200/80">
+    <div>
+      <h1 class="text-[15px] font-bold tracking-tight leading-none" style="font-size: 36px; color: #14B8A6">CarbIQ</h1>
+      <p class="text-[10px] font-mono-d text-zinc-400 mt-1.5 tracking-[0.18em] uppercase">Multi-target detection · CO₂e estimation</p>
     </div>
+    <div class="flex items-center gap-2.5 rounded-full border border-zinc-200/80 bg-white px-4 py-2" style="background: linear-gradient(180deg, #14B8A680, #FFFFFF)">
+      <span id="status-dot" class="w-1.5 h-1.5 rounded-full bg-teal-500 pulse-dot"></span>
+      <span class="text-[11px] font-mono-d text-zinc-500">DUAL-TOWER · DMM · <span id="model-status" class="text-teal-600 font-semibold">READY</span></span>
+    </div>
+  </header>
 
-    <!-- 2) Analyze trigger + Stage-1 recall tuning -->
-    <div class="controls">
-      <button id="analyze" disabled>🧠 Analyze</button>
-      <div class="conf-box">
-        <label for="conf">Stage-1 threshold: <strong id="confVal">0.15</strong></label>
-        <input id="conf" type="range" min="0.05" max="0.90" step="0.05" value="0.15" />
-        <span class="hint">Kept LOW on purpose — the detector should over-find; the ViT's material scores carry the certainty. Nudge higher (~0.30) for cluttered indoor scenes.</span>
+  <div class="flex-1 min-h-0 flex flex-col md:flex-row">
+
+    <!-- ============ LEFT PANEL · VISUAL INSPECTION ============ -->
+    <section class="relative w-full md:flex-1 md:min-w-0 flex flex-col p-6 gsap-panel-left">
+      <div class="relative w-full aspect-square md:aspect-auto md:flex-1 rounded-2xl border border-zinc-200/80 bg-white overflow-hidden">
+        <canvas id="detection-canvas" class="absolute inset-0 w-full h-full block"></canvas>
+
+        <!-- Geolocation badge -->
+        <div id="geo-badge" class="absolute top-4 left-4 z-20 flex items-center gap-2.5 rounded-full border border-zinc-200/80 bg-white/85 backdrop-blur-md pl-3.5 pr-4 py-2 whitespace-nowrap gsap-badge">
+          <span class="w-2 h-2 rounded-full bg-teal-500 pulse-dot shrink-0"></span>
+          <span id="geo-mode" class="font-mono-d text-[10px] tracking-[0.18em] text-zinc-400 uppercase shrink-0">LOCATING</span>
+          <span id="geo-code" class="text-xs font-bold text-zinc-900 shrink-0">—</span>
+          <span id="geo-name" class="text-xs text-zinc-500 shrink-0"></span>
+        </div>
+
+        <!-- Detection count footer -->
+        <div class="absolute bottom-4 left-4 z-20 flex items-center gap-3 rounded-lg border border-zinc-200/80 bg-white/85 backdrop-blur-md px-3.5 py-1.5">
+          <span class="font-mono-d text-[11px] text-zinc-500"><span id="object-count" class="text-teal-600 font-semibold">0</span> objects · click a box to inspect</span>
+          <button id="new-scan-btn" class="hidden font-mono-d text-[11px] font-semibold text-teal-600 hover:text-teal-500 transition-colors duration-200">↺ NEW SCAN</button>
+        </div>
+
+        <!-- Drop-zone modal card -->
+        <div id="drop-overlay" class="absolute inset-0 z-10 flex items-center justify-center" style="background: linear-gradient(360deg, rgb(255, 255, 255), rgba(20, 184, 166, 0.35));">
+          <input id="file-input" type="file" accept="image/*" class="hidden">
+          <span class="flex flex-col items-center gap-4 md:gap-3 lg:gap-4 rounded-2xl border border-zinc-300 bg-zinc-100 w-fit max-w-[85%] px-10 md:px-8 lg:px-16 py-10 md:py-8 lg:py-12 shadow-md shadow-zinc-900/[0.07] transition-colors duration-300">
+            <span class="w-14 h-14 md:w-10 md:h-10 lg:w-14 lg:h-14 rounded-full bg-teal-50 border border-teal-200/80 flex items-center justify-center text-teal-500 text-2xl md:text-lg lg:text-2xl font-light">↑</span>
+            <span class="w-full text-center text-sm font-semibold text-zinc-900">Drop an image to run detection</span>
+
+            <span class="flex items-center gap-5 mt-1 whitespace-nowrap">
+              <button id="browse-btn" class="flex items-center gap-2 shrink-0 whitespace-nowrap text-xs font-medium text-zinc-500 hover:text-teal-600 transition-colors duration-200">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" class="shrink-0"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"></path></svg>
+                <span class="whitespace-nowrap">Browse Files</span>
+              </button>
+              <span class="border-r border-zinc-200 h-4 shrink-0"></span>
+              <button id="camera-btn" class="flex items-center gap-2 shrink-0 whitespace-nowrap text-xs font-medium text-zinc-500 hover:text-teal-600 transition-colors duration-200">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" class="shrink-0"><path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2l1-1.5h7L16.5 7h2A1.5 1.5 0 0 1 20 8.5v9A1.5 1.5 0 0 1 18.5 19h-13A1.5 1.5 0 0 1 4 17.5v-9Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"></path><circle cx="12" cy="13" r="3" stroke="currentColor" stroke-width="1.6"></circle></svg>
+                <span class="whitespace-nowrap">Use Camera</span>
+              </button>
+            </span>
+
+            <span class="w-full text-center font-mono-d text-[10px] tracking-[0.18em] uppercase mt-1" style="color: #14B8A6">JPG · PNG · WEBP</span>
+            <span class="w-full text-center font-mono-d text-[10px] tracking-[0.18em] uppercase" style="color: #00000080">100% local dual-tower inference</span>
+          </span>
+        </div>
+
+        <!-- Camera overlay -->
+        <div id="camera-overlay" class="hidden absolute inset-0 z-30 flex-col items-center justify-center gap-4 bg-zinc-900/80 backdrop-blur-sm">
+          <video id="camera-video" autoplay playsinline muted class="max-w-[80%] max-h-[70%] rounded-xl border border-zinc-700 shadow-lg"></video>
+          <div class="flex items-center gap-3">
+            <button id="capture-btn" class="rounded-full bg-teal-500 hover:bg-teal-400 text-white text-xs font-semibold px-5 py-2.5 transition-colors duration-200">Capture</button>
+            <button id="cancel-camera-btn" class="rounded-full bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs font-semibold px-5 py-2.5 transition-colors duration-200">Cancel</button>
+          </div>
+        </div>
       </div>
-    </div>
+    </section>
 
-    <div id="status"></div>
+    <!-- ============ RIGHT PANEL · CARBON TELEMETRY ============ -->
+    <section id="right-panel" class="w-full md:w-[45%] md:min-w-[420px] md:max-w-[620px] h-auto md:h-full overflow-visible md:overflow-y-auto border-l-0 md:border-l border-zinc-200/80 bg-zinc-50 gsap-panel-right">
+      <div class="p-8 flex flex-col gap-6">
 
-    <!-- 3) Annotated canvas (bounding boxes) + hover/click inspector -->
-    <div class="layout">
-      <div class="canvas-col" id="shell" style="display:none">
-        <img id="preview" alt="preview" />
-        <canvas id="canvas" style="display:none"></canvas>
+        <!-- MODULE A · Total estimated footprint -->
+        <article class="rounded-2xl border border-zinc-300 bg-zinc-100 p-7 shadow-sm shadow-zinc-900/[0.04] gsap-telemetry">
+          <div class="flex items-start justify-between">
+            <p class="font-mono-d text-[10px] tracking-[0.2em] uppercase text-zinc-400">Total estimated footprint</p>
+            <span id="status-chip" class="rounded-full border px-2.5 py-1 text-[10px] font-mono-d tracking-wider uppercase text-center whitespace-nowrap shrink-0 flex items-center justify-center border-teal-200/80 bg-teal-50 text-teal-700">AWAITING SCAN</span>
+          </div>
+          <div class="mt-4 flex items-baseline gap-3">
+            <span id="carbon-number" class="text-6xl font-extrabold tracking-tight text-zinc-900 tabular-nums">0.000</span>
+            <span class="text-sm font-semibold text-teal-600">kg CO₂e</span>
+          </div>
+          <p class="mt-2.5 text-xs text-zinc-500">≈ <span class="text-zinc-900 font-semibold"><span id="km-equiv">0.0</span> km</span> driven in a petrol car · factors: <span id="provider-label" class="text-zinc-900 font-semibold">local (γ proxy)</span></p>
+
+          <div class="mt-6 grid grid-cols-3 gap-3">
+            <div class="rounded-xl border border-zinc-200/80 bg-zinc-50 px-4 py-3">
+              <p class="font-mono-d text-[9px] tracking-[0.18em] uppercase text-zinc-400">Items</p>
+              <p id="stat-items" class="mt-1 text-lg font-bold text-zinc-900 tabular-nums">0</p>
+            </div>
+            <div class="rounded-xl border border-zinc-200/80 bg-zinc-50 px-4 py-3">
+              <p class="font-mono-d text-[9px] tracking-[0.18em] uppercase text-zinc-400">Mass</p>
+              <p class="mt-1 text-lg font-bold text-zinc-900 tabular-nums"><span id="stat-mass">0.000</span><span class="text-[11px] font-medium text-zinc-400 ml-1">kg</span></p>
+            </div>
+            <div class="rounded-xl border border-zinc-200/80 bg-zinc-50 px-4 py-3">
+              <p class="font-mono-d text-[9px] tracking-[0.18em] uppercase text-zinc-400">Recyclable</p>
+              <p class="mt-1 text-lg font-bold text-teal-600 tabular-nums"><span id="stat-recyclable">0</span><span class="text-[11px] font-medium text-zinc-400 ml-1">%</span></p>
+            </div>
+          </div>
+        </article>
+
+        <!-- MODULE B · Emission factor profile -->
+        <article class="rounded-2xl border border-zinc-300 bg-zinc-100 p-6 shadow-sm shadow-zinc-900/[0.04] gsap-card">
+          <div class="flex flex-col md:flex-col lg:flex-row lg:items-center justify-between gap-3 lg:gap-4">
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-semibold text-zinc-900">Emission factor profile</p>
+              <p class="mt-1 text-xs font-normal text-zinc-500 whitespace-nowrap tracking-tight" style="overflow: hidden">Grid intensity <span id="grid-intensity" class="font-mono-d text-zinc-900 font-medium">—</span> kgCO₂/kWh · <span id="geo-mode-lower">auto-detected region</span></p>
+            </div>
+            <select id="country-select" class="w-full md:w-full lg:w-auto lg:shrink-0 lg:max-w-[220px] rounded-lg border border-zinc-200/80 bg-white text-zinc-900 text-sm font-medium px-3.5 py-2 outline-none focus:border-teal-500/60 focus:ring-2 focus:ring-teal-500/10 cursor-pointer"></select>
+          </div>
+        </article>
+
+        <!-- MODULE C · Detected items inspector -->
+        <div class="flex items-baseline justify-between px-1">
+          <h2 class="text-sm font-bold text-zinc-900 tracking-tight">Detected items</h2>
+          <span id="dmm-provider" class="font-mono-d text-[10px] tracking-[0.18em] uppercase text-zinc-400">bi-directional focus · sync’d to canvas</span>
+        </div>
+
+        <div id="items-list" class="flex flex-col gap-6">
+          <p id="items-empty" class="text-xs text-zinc-400 px-1">Run a detection to populate the item inspector — every card links 1:1 to its bounding box.</p>
+        </div>
+
       </div>
-      <div id="inspector"></div>
-    </div>
-
-    <ul id="items"></ul>
-
-    <!-- 4) Raw JSON returned by the backend -->
-    <h2>Raw API response</h2>
-    <pre id="json"></pre>
-
-    <p class="note">Powered by <code>POST /api/predict</code> →
-      waste detector (<code>models/yolov8n-waste-det.pt</code>, blended universal waste corpus)
-      + Method B physics (ψ tie-breaker)
-      + TrashNet ViT (<code>edwinpalegre/ee8225-group4-vit-trashnet-enhanced</code>, 224×224 patches) ·
-      carbon = base coefficient × (box px² ÷ 8000) · first request downloads both models.</p>
+    </section>
   </div>
+</div>
 
-  <script>
-    // Colors keyed to the 7-class material taxonomy
-    // (classification_service.MATERIAL_CLASSES). Unknown labels fall back to pink.
-    const MATERIAL_COLORS = {
-      "biodegradable":   "#22c55e",
-      "cardboard":       "#f59e0b",
-      "glass":           "#06b6d4",
-      "metal":           "#818cf8",
-      "paper":           "#eab308",
-      "plastic":         "#ef4444",
-      "general rubbish": "#94a3b8",
-    };
-    const FALLBACK_COLOR = "#f43f5e";
-    const colorOf = (label) => MATERIAL_COLORS[label] || FALLBACK_COLOR;
-    // hex "#rrggbb" -> "rgba(r,g,b,a)" for tinted fills and soft borders.
-    function rgba(hex, a) {
-      const n = parseInt(hex.slice(1), 16);
-      return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+<!-- Error toast -->
+<div id="toast" class="hidden fixed bottom-6 left-1/2 -translate-x-1/2 z-50 rounded-xl bg-zinc-900 text-white text-xs font-medium px-5 py-3 shadow-lg max-w-[80%]"></div>
+
+<script>
+"use strict";
+/* =========================================================================
+   CarbIQ frontend — Step 7 SPA (design compiled to vanilla JS).
+
+   Real data flow (CLAUDE.md v3.6):
+     upload → POST /api/predict            (dual-tower boxes + materials)
+            → POST /api/calculate-impact   (Stage-B audit: id echo, weights
+                                            or box-area proxy, country)
+            → POST /api/recommend          (DMM: 3 ranked end-of-life paths
+                                            + child-simple verdict/pros/cons)
+   GSAP drives the intro timeline, card staggers, badge pops and the
+   carbon counter. No template runtime — plain DOM + fetch.
+   ========================================================================= */
+
+const GAMMA = 8000.0;               // display mirror of carbon_service.PIXEL_AREA_GAMMA
+const ALERT_KG = 0.12;              // per-item chip/box alert threshold (kg CO2e)
+const KM_PER_KG = 1 / 0.12;         // ~0.12 kg CO2e per petrol-car km
+const RECYCLABLE = new Set(["plastic", "glass", "metal", "cardboard", "paper"]);
+
+// Display-only reference data per taxonomy class (approximations for the
+// inspector cells; the CO2e numbers always come from the backend).
+const MATERIAL_META = {
+  "plastic":         { tag: "PLA", density: 0.95, decompose: "~450 yrs" },
+  "glass":           { tag: "GLS", density: 2.50, decompose: "~1M yrs" },
+  "metal":           { tag: "MET", density: 2.70, decompose: "~200 yrs" },
+  "cardboard":       { tag: "CRD", density: 0.69, decompose: "~2 months" },
+  "paper":           { tag: "PPR", density: 0.80, decompose: "~6 weeks" },
+  "biodegradable":   { tag: "BIO", density: 0.60, decompose: "~6 weeks" },
+  "general rubbish": { tag: "GEN", density: 0.40, decompose: "varies" },
+};
+// Reference grid intensities (kgCO2/kWh) for the profile card — display only.
+const COUNTRIES = [
+  { code: "MY", name: "Malaysia",      grid: 0.585 },
+  { code: "SG", name: "Singapore",     grid: 0.408 },
+  { code: "JP", name: "Japan",         grid: 0.462 },
+  { code: "CN", name: "China",         grid: 0.582 },
+  { code: "IN", name: "India",         grid: 0.713 },
+  { code: "US", name: "United States", grid: 0.386 },
+  { code: "DE", name: "Germany",       grid: 0.380 },
+  { code: "AU", name: "Australia",     grid: 0.531 },
+];
+const STATUS_CLS = {
+  "Optimal":    "bg-emerald-50 text-emerald-600",
+  "Acceptable": "bg-zinc-100 text-zinc-600",
+  "Warning":    "bg-amber-50 text-amber-600",
+};
+const TAB_LABEL = {
+  recycling: "Recycling", incineration: "Incineration", landfill: "Landfill",
+  composting: "Composting", anaerobic_digestion: "Digestion",
+  material_recovery: "Recovery",
+};
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const state = {
+  img: null,                // HTMLImageElement of the analysed photo
+  imgW: 0, imgH: 0,         // original pixel dims from /predict
+  items: [],                // /predict items (id, class_name, bbox, ...)
+  weights: {},              // id -> current weight (kg)
+  edited: new Set(),        // ids whose weight the user verified (Stage B)
+  audit: {},                // id -> {co2e_kg, factor, source, weight_source}
+  auditMeta: { provider: null, total: 0 },
+  recs: {},                 // id -> {paths: [3 ranked], provider}
+  process: {},              // id -> selected method key
+  activeId: null,
+  country: "MY",
+  geoMode: "AUTO-GEO",
+  reveal: 1,                // gsap-driven box draw-in progress
+  busy: false,
+};
+let carbonShown = { v: 0 };
+let canvas, ctx;
+
+/* ------------------------------ helpers ------------------------------ */
+
+function toast(msg, ms = 4200) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.classList.remove("hidden");
+  gsap.fromTo(el, { y: 16, opacity: 0 }, { y: 0, opacity: 1, duration: 0.3 });
+  clearTimeout(el._t);
+  el._t = setTimeout(() => gsap.to(el, {
+    opacity: 0, duration: 0.3, onComplete: () => el.classList.add("hidden"),
+  }), ms);
+}
+
+function setStatus(text, tone = "ok") {
+  $("model-status").textContent = text;
+  $("model-status").className = tone === "ok"
+    ? "text-teal-600 font-semibold" : "text-amber-600 font-semibold";
+  $("status-dot").className = "w-1.5 h-1.5 rounded-full pulse-dot "
+    + (tone === "ok" ? "bg-teal-500" : "bg-amber-500");
+}
+
+async function api(path, payload) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: payload instanceof FormData ? {} : { "Content-Type": "application/json" },
+    body: payload instanceof FormData ? payload : JSON.stringify(payload),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  return body;
+}
+
+function meta(material) {
+  return MATERIAL_META[material] || { tag: "OBJ", density: 1.0, decompose: "varies" };
+}
+function itemWeight(it) {
+  return state.weights[it.id] ?? +(it.box_area_px / GAMMA).toFixed(4);
+}
+function itemCo2(it) {
+  const a = state.audit[it.id];
+  return a ? a.co2e_kg : it.estimated_carbon_kg;   // Stage-A blind proxy until audited
+}
+function co2Color(v) {
+  return v > ALERT_KG ? (v > ALERT_KG * 2 ? "#f43f5e" : "#f59e0b") : "#14b8a6";
+}
+
+/* ------------------------------ country / geo ------------------------------ */
+
+function buildCountrySelect() {
+  const sel = $("country-select");
+  sel.innerHTML = COUNTRIES.map(c =>
+    `<option value="${c.code}">${c.code} — ${esc(c.name)}</option>`).join("");
+  sel.value = state.country;
+  sel.addEventListener("change", () => {
+    state.country = sel.value;
+    state.geoMode = "OVERRIDE";
+    syncGeoUi();
+    gsap.fromTo("#geo-badge", { scale: 0.92 }, { scale: 1, duration: 0.4, ease: "back.out(2)" });
+    if (state.items.length) { refreshImpact(); refreshRecommendations(); }
+  });
+}
+
+function countryName(code) {
+  const hit = COUNTRIES.find(c => c.code === code);
+  if (hit) return hit.name;
+  try { return new Intl.DisplayNames(["en"], { type: "region" }).of(code) || code; }
+  catch { return code; }
+}
+
+function syncGeoUi() {
+  const c = COUNTRIES.find(x => x.code === state.country);
+  $("geo-mode").textContent = state.geoMode;
+  $("geo-code").textContent = state.country;
+  $("geo-name").textContent = countryName(state.country);
+  $("grid-intensity").textContent = c ? c.grid.toFixed(3) : "—";
+  $("geo-mode-lower").textContent =
+    state.geoMode === "OVERRIDE" ? "manual override" : "auto-detected region";
+}
+
+async function geolocate() {
+  try {
+    const res = await fetch("https://ipapi.co/json/", { signal: AbortSignal.timeout(4000) });
+    const data = await res.json();
+    const code = String(data.country_code || "").toUpperCase();
+    if (/^[A-Z]{2}$/.test(code)) {
+      if (!COUNTRIES.some(c => c.code === code)) {
+        COUNTRIES.unshift({ code, name: countryName(code), grid: NaN });
+        buildCountrySelect();
+      }
+      state.country = code;
+      $("country-select").value = code;
     }
+  } catch { /* offline / blocked — keep the MY default silently */ }
+  state.geoMode = "AUTO-GEO";
+  syncGeoUi();
+  gsap.fromTo("#geo-badge", { scale: 0.9, opacity: 0.4 },
+    { scale: 1, opacity: 1, duration: 0.5, ease: "back.out(2)" });
+}
 
-    const drop       = document.getElementById("drop");
-    const fileInput  = document.getElementById("file");
-    const analyzeBtn = document.getElementById("analyze");
-    const statusEl   = document.getElementById("status");
-    const shell      = document.getElementById("shell");
-    const preview    = document.getElementById("preview");
-    const canvas     = document.getElementById("canvas");
-    const ctx        = canvas.getContext("2d");
-    const inspector  = document.getElementById("inspector");
-    const itemsEl    = document.getElementById("items");
-    const jsonEl     = document.getElementById("json");
-    const confSlider = document.getElementById("conf");
-    const confVal    = document.getElementById("confVal");
+/* ------------------------------ upload / camera ------------------------------ */
 
-    let selectedFile = null;
-    let state = null;        // { items, image, img, scale } after a successful analyze
-    let hoveredId = null;    // box under the cursor
-    let selectedId = null;   // box pinned by click
+function wireUpload() {
+  const overlay = $("drop-overlay");
+  overlay.addEventListener("dragover", (e) => e.preventDefault());
+  overlay.addEventListener("drop", (e) => {
+    e.preventDefault();
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) analyze(f);
+  });
+  $("browse-btn").addEventListener("click", () => $("file-input").click());
+  $("file-input").addEventListener("change", (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (f) analyze(f);
+  });
+  $("new-scan-btn").addEventListener("click", () => {
+    overlay.classList.remove("hidden");
+    gsap.fromTo(overlay, { opacity: 0 }, { opacity: 1, duration: 0.35 });
+  });
 
-    confSlider.addEventListener("input", () => { confVal.textContent = confSlider.value; });
+  $("camera-btn").addEventListener("click", openCamera);
+  $("capture-btn").addEventListener("click", captureFrame);
+  $("cancel-camera-btn").addEventListener("click", closeCamera);
+}
 
-    // --- Upload zone wiring (click + drag & drop) ---
-    drop.addEventListener("click", () => fileInput.click());
-    fileInput.addEventListener("change", (e) => selectFile(e.target.files[0]));
-    ["dragover", "dragenter"].forEach(ev =>
-      drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("hover"); }));
-    ["dragleave", "drop"].forEach(ev =>
-      drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("hover"); }));
-    drop.addEventListener("drop", (e) => selectFile(e.dataTransfer.files[0]));
+let cameraStream = null;
+async function openCamera() {
+  try {
+    cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+    $("camera-video").srcObject = cameraStream;
+    $("camera-overlay").classList.remove("hidden");
+    $("camera-overlay").classList.add("flex");
+  } catch (err) { toast("Camera unavailable: " + err.message); }
+}
+function closeCamera() {
+  if (cameraStream) { cameraStream.getTracks().forEach(t => t.stop()); cameraStream = null; }
+  $("camera-overlay").classList.add("hidden");
+  $("camera-overlay").classList.remove("flex");
+}
+function captureFrame() {
+  const v = $("camera-video");
+  if (!v.videoWidth) return;
+  const cv = document.createElement("canvas");
+  cv.width = v.videoWidth; cv.height = v.videoHeight;
+  cv.getContext("2d").drawImage(v, 0, 0);
+  cv.toBlob((blob) => {
+    closeCamera();
+    if (blob) analyze(new File([blob], "capture.png", { type: "image/png" }));
+  }, "image/png");
+}
 
-    function setStatus(msg, isError = false) {
-      statusEl.textContent = msg;
-      statusEl.classList.toggle("error", isError);
+/* ------------------------------ core flow ------------------------------ */
+
+async function analyze(file) {
+  if (state.busy) return;
+  state.busy = true;
+  setStatus("ANALYZING…", "warn");
+  try {
+    const form = new FormData();
+    form.append("image", file);
+    const data = await api("/api/predict", form);
+
+    // Fresh scan state.
+    state.items = data.items;
+    state.imgW = data.image.width;
+    state.imgH = data.image.height;
+    state.weights = {}; state.edited = new Set();
+    state.audit = {}; state.recs = {}; state.process = {};
+    state.auditMeta = { provider: "local (γ proxy)", total: null };
+    state.activeId = data.items.length
+      ? data.items.reduce((a, b) => (b.confidence > a.confidence ? b : a)).id : null;
+
+    // Show the user's own file immediately (same pixels the server analysed).
+    const img = new Image();
+    img.onload = () => { state.img = img; draw(); };
+    img.src = URL.createObjectURL(file);
+
+    const overlay = $("drop-overlay");
+    gsap.to(overlay, { opacity: 0, duration: 0.35, onComplete: () => {
+      overlay.classList.add("hidden"); overlay.style.opacity = "";
+    }});
+    $("new-scan-btn").classList.remove("hidden");
+    $("object-count").textContent = data.items.length;
+
+    renderItems();
+    updateTelemetry();
+    // GSAP: stagger the fresh cards in + draw-in sweep for the boxes.
+    gsap.fromTo(".gsap-stagger-item", { y: 18, opacity: 0 },
+      { y: 0, opacity: 1, duration: 0.5, ease: "power2.out", stagger: 0.08 });
+    gsap.fromTo(state, { reveal: 0 }, { reveal: 1, duration: 0.7, ease: "power2.out", onUpdate: draw });
+
+    if (!data.items.length) {
+      toast("No waste-like objects detected — try a closer, brighter shot.");
+      setStatus("READY");
+    } else {
+      setStatus("AUDITING…", "warn");
+      await Promise.all([refreshImpact(), refreshRecommendations()]);
+      setStatus("READY");
     }
+  } catch (err) {
+    toast("Analysis failed: " + err.message);
+    setStatus("ERROR", "warn");
+  } finally {
+    state.busy = false;
+  }
+}
 
-    // Instant local preview; the pipeline only runs on button press.
-    function selectFile(file) {
-      if (!file) return;
-      selectedFile = file;
-      state = null; hoveredId = null; selectedId = null;
-      preview.src = URL.createObjectURL(file);
-      preview.style.display = "block";
-      canvas.style.display = "none";
-      shell.style.display = "block";
-      inspector.style.display = "none";
-      itemsEl.innerHTML = "";
-      jsonEl.style.display = "none";
-      analyzeBtn.disabled = false;
-      setStatus(`Ready: ${file.name} (${(file.size / 1024).toFixed(0)} KB) — press Analyze.`);
-    }
+function impactPayloadItems() {
+  return state.items.map(it => state.edited.has(it.id)
+    ? { id: it.id, material: it.class_name, weight_kg: state.weights[it.id] }
+    : { id: it.id, material: it.class_name, box_area_px: it.box_area_px });
+}
 
-    // --- Send the image through the dual-tower pipeline ---
-    analyzeBtn.addEventListener("click", async () => {
-      if (!selectedFile) return;
-      analyzeBtn.disabled = true;
-      setStatus("Analyzing… Stage 1 detects, Stage 2 classifies each padded patch (first request loads both models).");
+async function refreshImpact() {
+  if (!state.items.length) return;
+  try {
+    const data = await api("/api/calculate-impact",
+      { items: impactPayloadItems(), country: state.country });
+    data.items.forEach(row => {
+      state.audit[row.id] = row;
+      if (!state.edited.has(row.id)) state.weights[row.id] = row.weight_kg;
+    });
+    state.auditMeta = { provider: data.provider, total: data.total_co2e_kg };
+  } catch (err) {
+    toast("Carbon audit unavailable: " + err.message);
+  }
+  renderItems();
+  updateTelemetry();
+  draw();
+}
 
-      const form = new FormData();
-      form.append("image", selectedFile);
-      form.append("conf", confSlider.value);
-      try {
-        const res = await fetch("/api/predict", { method: "POST", body: form });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-        render(data);
-      } catch (err) {
-        setStatus("Error: " + err.message, true);
-      } finally {
-        analyzeBtn.disabled = false;
+async function refreshRecommendations() {
+  if (!state.items.length) return;
+  try {
+    const data = await api("/api/recommend", {
+      items: state.items.map(it => state.edited.has(it.id)
+        ? { material: it.class_name, weight_kg: state.weights[it.id] }
+        : { material: it.class_name, box_area_px: it.box_area_px }),
+      country: state.country,
+    });
+    data.items.forEach((rec, i) => {
+      const id = state.items[i].id;
+      state.recs[id] = rec;
+      const current = state.process[id];
+      if (!current || !rec.recommendations.some(p => p.method === current)) {
+        state.process[id] = rec.recommendations[0].method;   // default to rank 1
       }
     });
+    $("dmm-provider").textContent = "DMM · " + data.provider.replaceAll("_", " ");
+  } catch (err) {
+    toast("Recommendations unavailable: " + err.message);
+  }
+  renderItems();
+}
 
-    // --- Rendering ---------------------------------------------------------
-    function render(data) {
-      jsonEl.textContent = JSON.stringify(data, null, 2);
-      jsonEl.style.display = "block";
+/* ------------------------------ telemetry ------------------------------ */
 
-      const img = new Image();
-      img.onload = () => {
-        const colWidth = canvas.parentElement.clientWidth || 640;
-        const scale = Math.min(1, colWidth / data.image.width);
-        canvas.width = data.image.width * scale;
-        canvas.height = data.image.height * scale;
-        state = { items: data.items, image: data.image, img, scale };
-        hoveredId = null; selectedId = null;
+function updateTelemetry() {
+  const items = state.items;
+  const total = state.auditMeta.total ??
+    items.reduce((s, it) => s + itemCo2(it), 0);
+  const mass = items.reduce((s, it) => s + itemWeight(it), 0);
+  const recyclable = items.length
+    ? Math.round(100 * items.filter(it => RECYCLABLE.has(it.class_name)).length / items.length)
+    : 0;
 
-        preview.style.display = "none";
-        canvas.style.display = "block";
-        setStatus(`${data.items.length} item(s) · ${data.image.width}×${data.image.height}px — hover/click a box for the ViT breakdown.`);
-        renderList();
+  gsap.to(carbonShown, {
+    v: total, duration: 0.9, ease: "power3.out",
+    onUpdate: () => { $("carbon-number").textContent = carbonShown.v.toFixed(3); },
+  });
+  $("km-equiv").textContent = (total * KM_PER_KG).toFixed(1);
+  $("stat-items").textContent = items.length;
+  $("stat-mass").textContent = mass.toFixed(3);
+  $("stat-recyclable").textContent = recyclable;
+  $("provider-label").textContent = state.auditMeta.provider
+    ? `${state.auditMeta.provider} · ${state.country}` : "local (γ proxy)";
 
-        // Show the breakdown immediately: auto-pin the most confident item
-        // (hover/click still lets the user walk through the rest).
-        if (data.items.length) {
-          selectedId = data.items.reduce((a, b) => (b.confidence > a.confidence ? b : a)).id;
+  const chip = $("status-chip");
+  if (!items.length) {
+    chip.textContent = "AWAITING SCAN";
+    chip.className = "rounded-full border px-2.5 py-1 text-[10px] font-mono-d tracking-wider uppercase text-center whitespace-nowrap shrink-0 flex items-center justify-center border-teal-200/80 bg-teal-50 text-teal-700";
+    return;
+  }
+  const elevated = items.some(it => itemCo2(it) > ALERT_KG);
+  chip.textContent = elevated ? "ELEVATED IMPACT" : "LOW IMPACT";
+  chip.className = "rounded-full border px-2.5 py-1 text-[10px] font-mono-d tracking-wider uppercase text-center whitespace-nowrap shrink-0 flex items-center justify-center "
+    + (elevated ? "border-amber-200/80 bg-amber-50 text-amber-600"
+                : "border-teal-200/80 bg-teal-50 text-teal-700");
+}
+
+/* ------------------------------ item cards ------------------------------ */
+
+function tabsHtml(it) {
+  const rec = state.recs[it.id];
+  if (!rec) {
+    return `<div class="mt-4 rounded-full border border-zinc-200/80 bg-zinc-50 px-4 py-2 font-mono-d text-[10px] text-zinc-400 uppercase tracking-[0.18em]">Running decision simulation…</div>`;
+  }
+  const selected = state.process[it.id];
+  const buttons = rec.recommendations.map(p => {
+    const cls = p.method === selected
+      ? "bg-teal-100 text-teal-700" : "text-zinc-400 hover:text-zinc-600";
+    return `<button data-process="${p.method}" class="process-tab flex-1 min-w-0 rounded-full text-[11px] font-semibold py-1.5 px-1 truncate transition-colors duration-200 ${cls}">${p.rank}. ${TAB_LABEL[p.method] || p.method}</button>`;
+  }).join("");
+  const path = rec.recommendations.find(p => p.method === selected) || rec.recommendations[0];
+  return `
+    <div class="mt-4 flex items-center w-full gap-1 rounded-full border border-zinc-200/80 bg-zinc-50 p-1">${buttons}</div>
+    <div class="mt-3 rounded-xl bg-zinc-50 border border-zinc-200/80 p-4 flex flex-col gap-3 dmm-panel">
+      <div class="flex items-center justify-between">
+        <span class="rounded-md bg-teal-50 border border-teal-200/80 text-teal-700 font-mono-d text-[9px] tracking-[0.18em] px-2 py-1">DMM</span>
+        <span class="rounded-full px-2.5 py-1 text-[10px] font-semibold ${STATUS_CLS[path.status_tag] || STATUS_CLS.Acceptable}">Rank #${path.rank} · ${esc(path.status_tag)} · ${path.carbon_impact_kg.toFixed(3)} kg</span>
+      </div>
+      <p class="text-xs leading-relaxed text-zinc-500">${esc(path.encouraging_verdict)}</p>
+      <div class="pl-2 flex flex-col gap-1.5">
+        <div class="flex items-start gap-2">
+          <span class="shrink-0 mt-0.5 w-3.5 h-3.5 rounded-full bg-teal-50 border border-teal-200/80 text-teal-600 text-[9px] font-bold flex items-center justify-center leading-none">+</span>
+          <p class="text-[11px] leading-relaxed text-zinc-500"><span class="font-semibold text-zinc-600">Pros:</span> ${esc(path.environmental_pros)}</p>
+        </div>
+        <div class="flex items-start gap-2">
+          <span class="shrink-0 mt-0.5 w-3.5 h-3.5 rounded-full bg-amber-50 border border-amber-200/80 text-amber-600 text-[9px] font-bold flex items-center justify-center leading-none">–</span>
+          <p class="text-[11px] leading-relaxed text-zinc-500"><span class="font-semibold text-zinc-600">Cons:</span> ${esc(path.environmental_cons)}</p>
+        </div>
+      </div>
+    </div>`;
+}
+
+function cardHtml(it) {
+  const m = meta(it.class_name);
+  const audit = state.audit[it.id];
+  const weight = itemWeight(it);
+  const co2 = itemCo2(it);
+  const expanded = state.activeId === it.id;
+  const alert = co2 > ALERT_KG;
+  const co2Cls = alert ? (co2 > ALERT_KG * 2 ? "text-rose-500" : "text-amber-500") : "text-teal-600";
+  const tileCls = alert ? "border-amber-200/80 bg-amber-50 text-amber-600"
+                        : "border-teal-200/80 bg-teal-50 text-teal-700";
+  const factorLine = audit
+    ? `Factor ${audit.carbon_factor_kg_per_kg.toFixed(4)} kg/kg · ${audit.source} · ${audit.weight_source.replaceAll("_", " ")}`
+    : `Stage-A proxy · base × area ÷ γ`;
+  const volume = weight > 0 ? Math.round(weight / m.density * 1000) : 0;
+
+  return `
+  <article data-id="${it.id}" class="item-card rounded-2xl border border-zinc-300 bg-zinc-100 shadow-sm shadow-zinc-900/[0.04] cursor-pointer transition-all duration-300 hover:border-zinc-400 gsap-card gsap-stagger-item ${expanded ? "active-item p-6" : "py-2.5 px-6"}">
+    <div class="flex items-center gap-4">
+      <div class="w-11 h-11 shrink-0 self-start rounded-xl border flex items-center justify-center font-mono-d text-[11px] font-semibold ${tileCls}">${m.tag}</div>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center justify-between gap-3">
+          <div class="flex-1 min-w-0">
+            <h3 class="text-sm font-bold text-zinc-900 leading-tight truncate">${esc(it.display_name)}</h3>
+            <p class="mt-1 font-mono-d text-xs text-zinc-400 tracking-tight whitespace-nowrap truncate">CONF ${it.confidence.toFixed(2)} · ψ ${it.physics.plasticity_index.toFixed(2)} · box ${Math.round(it.box_area_px).toLocaleString()} px²</p>
+          </div>
+          <div class="flex items-center gap-3 shrink-0">
+            <div class="text-right">
+              <p class="text-lg font-extrabold tabular-nums leading-none ${co2Cls}">${co2.toFixed(3)}</p>
+              <p class="mt-1 font-mono-d text-[9px] tracking-[0.18em] uppercase text-zinc-400">kg CO₂e</p>
+              ${expanded ? `<p class="mt-1 font-mono-d text-[9px] text-zinc-400 tabular-nums whitespace-nowrap">${factorLine}</p>` : ""}
+            </div>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" class="shrink-0 text-zinc-400 transition-transform duration-300 ${expanded ? "rotate-180" : ""}"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+          </div>
+        </div>
+        ${expanded ? `
+        <div class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2.5 expand-body">
+          <label class="flex flex-col md:flex-col lg:flex-row items-start md:items-start lg:items-center justify-between gap-1 md:gap-1 lg:gap-2 rounded-lg border border-zinc-200/80 bg-zinc-50 px-2.5 md:px-2.5 lg:px-3 py-2">
+            <span class="font-mono-d text-[8px] md:text-[8px] lg:text-[9px] tracking-tight lg:tracking-[0.18em] uppercase text-zinc-400 shrink-0">Weight${state.edited.has(it.id) ? " · verified" : " · proxy"}</span>
+            <span class="flex items-center gap-1.5 w-full">
+              <input type="number" step="0.005" min="0" value="${weight}" class="weight-input w-full min-w-0 bg-transparent text-left md:text-left lg:text-right text-[13px] md:text-[13px] lg:text-sm font-semibold text-zinc-900 tabular-nums outline-none">
+              <span class="text-[10px] md:text-[10px] lg:text-[11px] text-zinc-400 shrink-0">kg</span>
+            </span>
+          </label>
+          <div class="flex flex-col md:flex-col lg:flex-row items-start md:items-start lg:items-center justify-between gap-1 md:gap-1 lg:gap-2 rounded-lg border border-zinc-200/80 bg-zinc-50 px-2.5 md:px-2.5 lg:px-3 py-2">
+            <span class="font-mono-d text-[8px] md:text-[8px] lg:text-[9px] tracking-tight lg:tracking-[0.18em] uppercase text-zinc-400 shrink-0">Density</span>
+            <span class="text-[13px] md:text-[13px] lg:text-sm font-semibold text-zinc-500 tabular-nums tracking-tight whitespace-nowrap">${m.density.toFixed(2)} <span class="text-[9px] md:text-[9px] lg:text-[10px] text-zinc-400 font-medium">g/cm³</span></span>
+          </div>
+          <div class="flex flex-col md:flex-col lg:flex-row items-start md:items-start lg:items-center justify-between gap-1 md:gap-1 lg:gap-2 rounded-lg border border-zinc-200/80 bg-zinc-50 px-2.5 md:px-2.5 lg:px-3 py-2">
+            <span class="font-mono-d text-[8px] md:text-[8px] lg:text-[9px] tracking-tight lg:tracking-[0.18em] uppercase text-zinc-400 shrink-0">Est. vol</span>
+            <span class="text-[13px] md:text-[13px] lg:text-sm font-semibold text-zinc-500 tabular-nums tracking-tight whitespace-nowrap">${volume.toLocaleString()} <span class="text-[9px] md:text-[9px] lg:text-[10px] text-zinc-400 font-medium">cm³</span></span>
+          </div>
+          <div class="flex flex-col md:flex-col lg:flex-row items-start md:items-start lg:items-center justify-between gap-1 md:gap-1 lg:gap-2 rounded-lg border border-zinc-200/80 bg-zinc-50 px-2.5 md:px-2.5 lg:px-3 py-2">
+            <span class="font-mono-d text-[8px] md:text-[8px] lg:text-[9px] tracking-tight lg:tracking-[0.18em] uppercase text-zinc-400 shrink-0">Decomposes</span>
+            <span class="text-[13px] md:text-[13px] lg:text-sm font-semibold text-zinc-500 tracking-tight whitespace-nowrap">${m.decompose}</span>
+          </div>
+        </div>
+        ${tabsHtml(it)}` : ""}
+      </div>
+    </div>
+  </article>`;
+}
+
+function renderItems() {
+  const list = $("items-list");
+  if (!state.items.length) {
+    list.innerHTML = `<p class="text-xs text-zinc-400 px-1">Run a detection to populate the item inspector — every card links 1:1 to its bounding box.</p>`;
+    return;
+  }
+  list.innerHTML = state.items.map(cardHtml).join("");
+
+  list.querySelectorAll(".item-card").forEach(card => {
+    const id = +card.dataset.id;
+    card.addEventListener("click", () => setActive(state.activeId === id ? null : id));
+
+    card.querySelectorAll(".weight-input").forEach(inp => {
+      inp.addEventListener("click", (e) => e.stopPropagation());
+      inp.addEventListener("input", (e) => {
+        const v = Math.max(0, parseFloat(e.target.value) || 0);
+        if (v > 0) {
+          state.weights[id] = v;
+          state.edited.add(id);
+          scheduleRefresh();
         }
-        drawBoxes();
-        renderInspector(selectedId);
-        highlightListRow();
-      };
-      img.onerror = () => setStatus("Could not load the uploaded image for preview.", true);
-      img.src = data.image.url;   // server-saved copy, so boxes align with what the model saw
-    }
-
-    function drawBoxes() {
-      if (!state) return;
-      const { items, img, scale } = state;
-      const activeId = (hoveredId !== null) ? hoveredId : selectedId;
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-      items.forEach((it) => {
-        const [x1, y1, x2, y2] = it.bbox.map((v) => v * scale);
-        const w = x2 - x1, h = y2 - y1;
-        const color = colorOf(it.class_name);
-        const active = it.id === activeId;
-
-        // Enterprise dashboard look: crisp semi-transparent border with a
-        // very light interior tint; the active box gets a stronger presence.
-        ctx.fillStyle = rgba(color, active ? 0.16 : 0.05);
-        ctx.fillRect(x1, y1, w, h);
-        ctx.lineWidth = active ? 3.5 : 2;
-        ctx.strokeStyle = rgba(color, active ? 1.0 : 0.8);
-        ctx.strokeRect(x1, y1, w, h);
-
-        // Label chip hovering over the top-left corner of the rectangle.
-        const label = `${it.display_name} ${(it.confidence * 100).toFixed(0)}%`;
-        ctx.font = "600 14px system-ui, sans-serif";
-        const tw = ctx.measureText(label).width + 10;
-        ctx.fillStyle = color;
-        ctx.fillRect(x1 - 1, Math.max(0, y1 - 20), tw, 20);
-        ctx.fillStyle = "#0b1220";
-        ctx.fillText(label, x1 + 4, Math.max(14, y1 - 6));
       });
-    }
-
-    // Rectangular hit test; overlapping boxes -> smallest area wins.
-    function hitTest(mx, my) {
-      if (!state) return null;
-      let best = null, bestArea = Infinity;
-      state.items.forEach((it) => {
-        const [x1, y1, x2, y2] = it.bbox.map((v) => v * state.scale);
-        if (mx >= x1 && mx <= x2 && my >= y1 && my <= y2 && it.box_area_px < bestArea) {
-          bestArea = it.box_area_px;
-          best = it.id;
-        }
+    });
+    card.querySelectorAll(".process-tab").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        state.process[id] = btn.dataset.process;
+        renderItems();
+        const panel = list.querySelector(`[data-id="${id}"] .dmm-panel`);
+        if (panel) gsap.fromTo(panel, { y: 8, opacity: 0 }, { y: 0, opacity: 1, duration: 0.35 });
       });
-      return best;
-    }
-
-    canvas.addEventListener("mousemove", (e) => {
-      const r = canvas.getBoundingClientRect();
-      const id = hitTest(e.clientX - r.left, e.clientY - r.top);
-      canvas.style.cursor = (id !== null) ? "pointer" : "default";
-      if (id !== hoveredId) {
-        hoveredId = id;
-        drawBoxes();
-        renderInspector(hoveredId !== null ? hoveredId : selectedId);
-        highlightListRow();
-      }
     });
-    canvas.addEventListener("mouseleave", () => {
-      hoveredId = null;
-      drawBoxes();
-      renderInspector(selectedId);
-      highlightListRow();
+  });
+}
+
+let refreshTimer = null;
+function scheduleRefresh() {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(async () => {
+    setStatus("AUDITING…", "warn");
+    await Promise.all([refreshImpact(), refreshRecommendations()]);
+    setStatus("READY");
+  }, 650);
+}
+
+function setActive(id) {
+  state.activeId = id;
+  renderItems();
+  draw();
+  if (id != null) {
+    const card = document.querySelector(`.item-card[data-id="${id}"]`);
+    if (card) {
+      $("right-panel").scrollTo({ top: card.offsetTop - 24, behavior: "smooth" });
+      const body = card.querySelector(".expand-body");
+      if (body) gsap.fromTo(body, { y: 10, opacity: 0 }, { y: 0, opacity: 1, duration: 0.35, ease: "power2.out" });
+    }
+  }
+}
+
+/* ------------------------------ canvas ------------------------------ */
+
+function getImgRect(W, H) {
+  if (!state.img) return { x: 0, y: 0, w: W, h: H };
+  const maxH = H * 0.92;
+  const s = Math.min(W / state.imgW, maxH / state.imgH);
+  const iw = state.imgW * s, ih = state.imgH * s;
+  return { x: (W - iw) / 2, y: (H - ih) / 2, w: iw, h: ih };
+}
+
+function hitTest(e) {
+  const r = canvas.getBoundingClientRect();
+  const rect = getImgRect(r.width, r.height);
+  const px = ((e.clientX - r.left) - rect.x) / rect.w * state.imgW;
+  const py = ((e.clientY - r.top) - rect.y) / rect.h * state.imgH;
+  // smallest box wins on overlap (same rule as the Test Brain page)
+  return state.items
+    .filter(it => px >= it.bbox[0] && px <= it.bbox[2] && py >= it.bbox[1] && py <= it.bbox[3])
+    .sort((a, b) => a.box_area_px - b.box_area_px)[0] || null;
+}
+
+function hexA(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+
+function draw() {
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  if (!W || !H) return;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  ctx.fillStyle = "#f4f4f5";
+  ctx.fillRect(0, 0, W, H);
+  const rect = getImgRect(W, H);
+
+  if (state.img) {
+    ctx.save();
+    ctx.shadowColor = "rgba(24,24,27,0.10)";
+    ctx.shadowBlur = 24;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+    ctx.restore();
+    ctx.drawImage(state.img, rect.x, rect.y, rect.w, rect.h);
+  } else {
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+  }
+
+  // fine blueprint grid, confined to the image area
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(rect.x, rect.y, rect.w, rect.h);
+  ctx.clip();
+  ctx.strokeStyle = "rgba(24,24,27,0.045)";
+  ctx.lineWidth = 1;
+  for (let x = rect.x; x < rect.x + rect.w; x += 48) { ctx.beginPath(); ctx.moveTo(x + 0.5, rect.y); ctx.lineTo(x + 0.5, rect.y + rect.h); ctx.stroke(); }
+  for (let y = rect.y; y < rect.y + rect.h; y += 48) { ctx.beginPath(); ctx.moveTo(rect.x, y + 0.5); ctx.lineTo(rect.x + rect.w, y + 0.5); ctx.stroke(); }
+  ctx.restore();
+
+  if (!state.img) return;
+  const reveal = state.reveal;
+
+  state.items.forEach(it => {
+    const active = state.activeId === it.id;
+    const co2 = itemCo2(it);
+    const color = co2Color(co2);
+    const x = rect.x + (it.bbox[0] / state.imgW) * rect.w;
+    const y = rect.y + (it.bbox[1] / state.imgH) * rect.h;
+    const w = ((it.bbox[2] - it.bbox[0]) / state.imgW) * rect.w;
+    const h = ((it.bbox[3] - it.bbox[1]) / state.imgH) * rect.h;
+
+    ctx.globalAlpha = reveal;
+    if (active) {
+      ctx.fillStyle = hexA(color, 0.06);
+      ctx.fillRect(x, y, w, h);
+    }
+    ctx.strokeStyle = active ? color : hexA(color, 0.65);
+    ctx.lineWidth = active ? 2.5 : 1.5;
+    ctx.strokeRect(x, y, w, h);
+
+    // corner ticks
+    const t = 12 * reveal;
+    ctx.strokeStyle = color; ctx.lineWidth = active ? 3 : 2;
+    [[x, y, 1, 1], [x + w, y, -1, 1], [x, y + h, 1, -1], [x + w, y + h, -1, -1]].forEach(([cx, cy, dx, dy]) => {
+      ctx.beginPath(); ctx.moveTo(cx + dx * t, cy); ctx.lineTo(cx, cy); ctx.lineTo(cx, cy + dy * t); ctx.stroke();
     });
-    canvas.addEventListener("click", (e) => {
-      const r = canvas.getBoundingClientRect();
-      const id = hitTest(e.clientX - r.left, e.clientY - r.top);
-      selectedId = (id === selectedId) ? null : id;   // click again to unpin
-      drawBoxes();
-      renderInspector(selectedId !== null ? selectedId : hoveredId);
-      highlightListRow();
-    });
 
-    // --- Inspector: ViT evidence + physics + carbon math for one item ------
-    function renderInspector(id) {
-      inspector.style.display = "block";
-      if (!state || id === null || !state.items[id]) {
-        inspector.innerHTML = `<span class="inspector-empty">Hover or click a bounding box
-          (or a row below) to inspect the ViT material analysis, the Method B physics
-          cues, and the box-area carbon estimate for that object.</span>`;
-        return;
-      }
-      const it = state.items[id];
-      const bars = it.material_scores.map((s) => `
-        <div class="bar-row">
-          <span class="bar-label">${s.label}</span>
-          <span class="bar-track"><span class="bar-fill"
-            style="width:${(s.score * 100).toFixed(1)}%; background:${colorOf(s.label)}"></span></span>
-          <span class="bar-pct">${(s.score * 100).toFixed(1)}%</span>
-        </div>`).join("");
+    // label chip
+    const text = `${it.display_name.toUpperCase()}  ${it.confidence.toFixed(2)}`;
+    ctx.font = '600 10px "JetBrains Mono", monospace';
+    const tw = ctx.measureText(text).width;
+    const ly = y - 22 < 6 ? y + 6 : y - 22;
+    ctx.fillStyle = active ? color : "#ffffff";
+    ctx.fillRect(x, ly, tw + 14, 17);
+    ctx.strokeStyle = hexA(color, 0.5); ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, ly + 0.5, tw + 13, 16);
+    ctx.fillStyle = active ? "#ffffff" : color;
+    ctx.fillText(text, x + 7, ly + 12);
+    ctx.globalAlpha = 1;
+  });
+}
 
-      inspector.innerHTML = `
-        <h3><span class="dot" style="background:${colorOf(it.class_name)}"></span>
-            Item ${it.id + 1}: ${it.display_name}</h3>
-        <div class="meta">Stage 1 detected this as &ldquo;${it.located_as}&rdquo;
-          (${(it.box_confidence * 100).toFixed(1)}%) — label discarded
-          · ViT material confidence ${(it.confidence * 100).toFixed(1)}%
-          · box ${Math.round(it.box_area_px).toLocaleString()} px²<br>
-          Method B: ψ ${it.physics.plasticity_index.toFixed(2)}
-          (wrinkle var ${Math.round(it.physics.laplacian_variance)},
-          edges ${(it.physics.edge_density * 100).toFixed(1)}%)
-          ${it.physics.tiebreak_applied
-            ? ' · <strong style="color:#f59e0b">physics tie-break corrected the ViT ranking</strong>'
-            : ' · no tie-break needed'}</div>
-        ${bars}
-        <div class="carbon-line">≈ ${it.estimated_carbon_kg} kg CO₂e
-          <small>= ${it.carbon_factor_kg_per_kg} (base ${it.display_name.toLowerCase()} coefficient)
-            × (${Math.round(it.box_area_px).toLocaleString()} px² ÷ 8000 γ)
-            — placeholder coefficients; live Climatiq + real weights land in Step 5</small>
-        </div>`;
-    }
+/* ------------------------------ boot ------------------------------ */
 
-    // --- Item list (rows mirror canvas hover/click) -------------------------
-    function renderList() {
-      if (!state.items.length) {
-        itemsEl.innerHTML = `<li style="cursor:default">No waste detected — try lowering the Stage-1 threshold.</li>`;
-        return;
-      }
-      itemsEl.innerHTML = state.items.map((it) => `
-        <li data-id="${it.id}">
-          <span class="dot" style="background:${colorOf(it.class_name)}"></span>
-          ${it.display_name} — <strong>${(it.confidence * 100).toFixed(1)}%</strong>
-          <span class="boxconf">det: ${it.located_as} ${(it.box_confidence * 100).toFixed(0)}% · ${Math.round(it.box_area_px).toLocaleString()} px²</span>
-          <span class="carbon">≈ ${it.estimated_carbon_kg} kg CO₂e</span>
-        </li>`).join("");
+document.addEventListener("DOMContentLoaded", () => {
+  canvas = $("detection-canvas");
+  ctx = canvas.getContext("2d");
+  new ResizeObserver(draw).observe(canvas);
+  canvas.addEventListener("click", (e) => {
+    const hit = hitTest(e);
+    setActive(hit ? hit.id : null);
+  });
+  canvas.addEventListener("mousemove", (e) => {
+    canvas.style.cursor = hitTest(e) ? "pointer" : "default";
+  });
 
-      itemsEl.querySelectorAll("li[data-id]").forEach((li) => {
-        const id = Number(li.dataset.id);
-        li.addEventListener("mouseenter", () => { hoveredId = id; drawBoxes(); renderInspector(id); highlightListRow(); });
-        li.addEventListener("mouseleave", () => { hoveredId = null; drawBoxes(); renderInspector(selectedId); highlightListRow(); });
-        li.addEventListener("click", () => {
-          selectedId = (selectedId === id) ? null : id;
-          drawBoxes(); renderInspector(selectedId !== null ? selectedId : id); highlightListRow();
-        });
-      });
-    }
+  buildCountrySelect();
+  syncGeoUi();
+  wireUpload();
+  geolocate();
+  draw();
 
-    function highlightListRow() {
-      const activeId = (hoveredId !== null) ? hoveredId : selectedId;
-      itemsEl.querySelectorAll("li[data-id]").forEach((li) =>
-        li.classList.toggle("active", Number(li.dataset.id) === activeId));
-    }
-  </script>
+  // GSAP intro orchestration.
+  const tl = gsap.timeline({ defaults: { ease: "power2.out" } });
+  tl.from("header", { y: -16, opacity: 0, duration: 0.5 })
+    .from(".gsap-panel-left", { x: -24, opacity: 0, duration: 0.55 }, "-=0.25")
+    .from(".gsap-panel-right", { x: 24, opacity: 0, duration: 0.55 }, "<")
+    .from(".gsap-telemetry, .gsap-card", { y: 20, opacity: 0, duration: 0.5, stagger: 0.09 }, "-=0.3")
+    .from("#geo-badge", { scale: 0.85, opacity: 0, duration: 0.45, ease: "back.out(2)" }, "-=0.2");
+});
+</script>
 </body>
 </html>
