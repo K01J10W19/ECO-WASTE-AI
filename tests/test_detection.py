@@ -7,8 +7,9 @@ weights, NO GPU and NO network. The processing layer (square padding +
 Method B physics extractor) runs for real on tiny generated images. We verify
 the detect → pad → classify → tie-break → carbon composition, the
 box-area payload, the box-area dynamic carbon formula (gamma = 8000), the psi
-plastic-vs-glass tie-breaker, box clamping, the Stage-1 conf override, and
-that an empty result is valid.
+plastic-vs-glass tie-breaker, box clamping, the Stage-1 conf override, the
+class-agnostic NMS predict contract (duplicate-box guard), and that an empty
+result is valid.
 """
 import types
 
@@ -148,6 +149,31 @@ def test_conf_override_surfaces_more_detections(app, monkeypatch, tmp_path):
 
     assert len(default_out["items"]) == 1     # low-confidence instance filtered
     assert len(lowered_out["items"]) == 2     # override lets it through
+
+
+def test_predict_runs_class_agnostic_suppression(app, monkeypatch, tmp_path):
+    """Duplicate-box guard: Ultralytics NMS is per-class by default, so one
+    object firing as both "Paper" and "Waste" survives suppression twice and
+    the ViT then names both crops identically. The predict call must request
+    class-agnostic suppression — exactly one box per physical object."""
+    captured = {}
+    result = types.SimpleNamespace(orig_shape=(720, 1280), boxes=[])
+
+    def predict(*args, **kwargs):
+        captured.update(kwargs)
+        return [result]
+
+    monkeypatch.setattr(
+        ds, "get_model",
+        lambda: types.SimpleNamespace(names=_DET_NAMES, predict=predict))
+
+    with app.app_context():
+        expected_conf = float(app.config["CONFIDENCE_THRESHOLD"])
+        ds.analyze_waste_pipeline(_real_image(tmp_path))
+
+    assert captured["agnostic_nms"] is True
+    assert captured["iou"] == ds._NMS_IOU == 0.45
+    assert captured["conf"] == expected_conf
 
 
 def _flat_patch(color=(90, 90, 90)):

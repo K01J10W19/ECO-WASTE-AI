@@ -47,7 +47,8 @@ rarely fires; nano backbone = max fps                     │
 5 coarse labels (Glass/Metal/Paper/                       ▼
 Plastic/Waste) noted as `located_as`,             ψ TIE-BREAK: ambiguous plastic-vs-
 NEVER trusted for identity                        glass calls corrected by physics
-conf=0.15 (recall-first, conf-only call)
+conf=0.15 (recall-first) + CLASS-AGNOSTIC
+NMS (iou=0.45): one box per physical object
          │
          └── Processing layer (anchored directly on box.xyxy):
              (a) CONTEXT-AWARE SQUARE PADDING:
@@ -152,7 +153,7 @@ Upload (multipart image)
   → POST /api/predict (thin controller: validate, save, delegate)
     → detection_service.analyze_waste_pipeline(image_path)
        1. Stage 1: specialist waste detector (models/yolov8n-waste-det.pt,
-          auto-fetched if missing), predict (conf only, 0.15)
+          auto-fetched if missing), predict (conf 0.15 + agnostic NMS, iou 0.45)
           → per instance: bbox via box.xyxy (clamped), box_confidence,
             located_as (Glass/Metal/Paper/Plastic/Waste — diagnostic),
             box_area_px = (x2-x1)*(y2-y1)
@@ -208,9 +209,12 @@ Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
 - Stage 1 stays vocabulary-free at call time: NO `set_classes()`, no prompt lists —
   that approach is archived (§11) after failing empirically. `located_as` is
   diagnostic-only; never surface it as the material or branch on it.
-- The Stage-1 predict call passes **`conf` only** — never add tuning knobs (`iou`,
-  `agnostic_nms`); library defaults handle suppression for the v8-seg weights, and
-  the YOLO26 A/B baseline is NMS-free anyway.
+- The Stage-1 predict call passes `conf` **plus CLASS-AGNOSTIC suppression
+  (`agnostic_nms=True, iou=0.45`)**. Default per-class NMS let one physical object
+  survive as overlapping boxes under different coarse labels (e.g. "Paper" +
+  "Waste"), which Stage 2 then named identically — duplicate frames on one item.
+  Agnostic NMS merges candidates across classes: one box per object. The NMS-free
+  A/B baselines (YOLO26, RT-DETR) accept and ignore these args. No further knobs.
 - Method B is a **tie-breaker, not a classifier**: it may only ever reorder an
   ambiguous plastic-vs-glass top-2; never let ψ overrule a clear ViT verdict or
   touch other materials.
@@ -230,7 +234,7 @@ Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
 | Processing layer (b) | **Method B** — `cv2.Laplacian` variance + `cv2.Canny` density → ψ; refs 500 / 0.10; tie-break margin 0.15 | Classical physics separates transparent glass vs plastic with zero retraining; tie-breaker only, fully audited in the payload. |
 | Stage 2 classifier | **`edwinpalegre/ee8225-group4-vit-trashnet-enhanced`** via HF `transformers` image-classification pipeline | Supervised ViT-B/16, TrashNet-enhanced, 98.17% val acc, Apache-2.0; native 7 labels (verified) map 1:1 onto the taxonomy. |
 | Label mapping | model `trash` → system `general rubbish`; all other labels identity | `MODEL_LABEL_TO_MATERIAL` in classification_service; tests enforce full coverage. |
-| Stage 1 tuning | `conf=0.15` default (per-request override) — **the only knob; NMS-free** | Recall-first; Stage 2 carries per-item certainty. |
+| Stage 1 tuning | `conf=0.15` default (per-request override) + **class-agnostic NMS** (`agnostic_nms=True, iou=0.45` — `_NMS_IOU` in `detection_service.py`) | Recall-first (Stage 2 carries per-item certainty); per-class default NMS kept duplicate cross-class boxes on one object — agnostic suppression guarantees one box per physical object (the NMS-free A/B baselines ignore the args). |
 | Carbon scaling | `estimated_carbon_kg = base x (box_area_px / γ)`, **γ = 8000** (recalibrated from 5000 for rectangular over-coverage, fill factor ~0.6) | Box area as volume/mass proxy until Step 5's real weights. |
 | Carbon provider | **Climatiq** (live, Step 5) with the **dummy per-kg coefficients** in `carbon_service.py` as the ever-present blank-key fallback | Dual-stage UX: blind local proxy at upload, audited live factors on user verification; the app never requires a key. |
 | Disposal-path matrix (DMM) | `carbon_service.DISPOSAL_METHOD_FACTORS` — 7 materials × 3 routes of NET kg CO2e/kg code constants; **credits are NEGATIVE** (offsets) | Deterministic, offline, auditable (every factor echoed in the payload); the ranking must never block on the network — live regional factors stay Module 2's audit concern. |
@@ -325,8 +329,10 @@ archived in §11 after failing empirically). What matters:
   from Stage 2 (+ the ψ tie-break); the pipeline never branches on `located_as` —
   even though the detector's labels *look* like materials, they are coarse,
   unvalidated, and NOT the verdict.
-- The predict call passes `conf` only; suppression is the library's default
-  behaviour for these weights.
+- The predict call passes `conf` plus class-agnostic suppression
+  (`agnostic_nms=True, iou=0.45`): the 5 coarse classes overlap on real objects
+  (one item can fire as both "Paper" and "Waste"), and per-class default NMS
+  kept both boxes — agnostic NMS collapses them to one box per physical object.
 
 ### Stage 2 — system taxonomy (`classification_service.MATERIAL_CLASSES`)
 
@@ -390,7 +396,8 @@ Rules:
     import services freely.
   - Stage-1 threshold: `CONFIDENCE_THRESHOLD` (default **0.15**, recall-first);
     per-request `conf` form-field override (clamped to [0.01, 1.0]). The predict
-    call passes conf only. Device from `INFERENCE_DEVICE` for both towers.
+    call adds class-agnostic NMS (`agnostic_nms=True, iou=0.45`) — the
+    duplicate-box guard. Device from `INFERENCE_DEVICE` for both towers.
   - All failures surface as `ApiError`; empty detections are a valid result.
 - **Hardware:** CPU works (well under a second per image for the nano detector);
   GTX 1650 handles both towers' *inference* trivially (v8-N ~0.05 GB + ViT-B/16
@@ -591,7 +598,7 @@ LLM_API_URL=https://api.groq.com/openai/v1/chat/completions
 MODEL_PATH=models/yolov8n-waste-det.pt   # Stage 1 specialist detector (auto-fetched if missing)
                                           # A/B: models/yolov8m-seg-trash.pt | yolo26x-seg.pt
 VIT_MODEL_NAME=edwinpalegre/ee8225-group4-vit-trashnet-enhanced   # Stage 2 (HF model id)
-CONFIDENCE_THRESHOLD=0.15         # Stage 1, recall-first — the ONLY Stage-1 knob (NMS-free)
+CONFIDENCE_THRESHOLD=0.15         # Stage 1, recall-first (code also fixes agnostic NMS, iou=0.45)
 INFERENCE_DEVICE=0                # BOTH towers: "cpu" or CUDA index ("0")
 DATABASE_URL=sqlite:///waste_app.db
 ```
@@ -790,8 +797,12 @@ retraining), whereas CLIP's was editable text.
   (§2, §11). `located_as` is diagnostic-only — even though the specialist's labels
   LOOK like materials (Glass/Metal/Paper/Plastic/Waste), never display them as the
   verdict or branch on them.
-- **Never** add NMS parameters (`iou`, `agnostic_nms`) to the Stage-1 predict call —
-  it passes `conf` only; library defaults do the rest for whichever weights are set.
+- Stage-1 suppression is **class-agnostic by design**: the predict call fixes
+  `agnostic_nms=True, iou=0.45` (`_NMS_IOU` in `detection_service.py`) — per-class
+  default NMS let one object survive as overlapping "Paper" + "Waste" boxes that
+  the ViT then named identically (duplicate frames). Never remove these args or
+  revert to per-class suppression; the NMS-free A/B baselines (YOLO26, RT-DETR)
+  simply ignore them. Add no other NMS knobs (`max_det`, etc.).
 - Method B is a TIE-BREAKER only: it may reorder an ambiguous plastic-vs-glass top-2
   (gap < `PLASTICITY_TIEBREAK_MARGIN` = 0.15) and nothing else. Its constants
   (`_LAPLACIAN_REF`, `_EDGE_DENSITY_REF`, margin) are code constants in

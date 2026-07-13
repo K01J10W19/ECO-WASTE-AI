@@ -56,6 +56,15 @@ _PAD_FILL = (114, 114, 114)
 # Processing layer: the ViT's native input resolution.
 _PATCH_SIZE = 224
 
+# Stage-1 suppression (duplicate-box guard): Ultralytics NMS is per-class by
+# default, so one physical object firing under TWO coarse labels (e.g. "Paper"
+# AND "Waste") survives suppression twice — and Stage 2 then names both crops
+# identically, painting duplicate overlapped frames on a single item.
+# agnostic_nms=True merges candidates ACROSS classes at this IoU, so exactly
+# one box survives per physical object. The NMS-free A/B baselines (YOLO26,
+# RT-DETR) accept and simply ignore these arguments.
+_NMS_IOU = 0.45
+
 # ---------------------------------------------------------------------------
 # Method B calibration constants (Plasticity Index psi).
 #
@@ -171,13 +180,16 @@ def _locate_objects(image_path: str, conf_threshold: float) -> tuple:
     ``located_as`` is the detector's own coarse label — kept purely for
     auditing; the pipeline never branches on it. ``box_area_px`` is the
     geometric box area (x2-x1)*(y2-y1) of the CLAMPED box — the volume/mass
-    proxy for carbon scaling. The predict call passes ``conf`` only.
+    proxy for carbon scaling. The predict call runs CLASS-AGNOSTIC suppression
+    (``agnostic_nms=True``, ``iou=_NMS_IOU``) so overlapping fires under
+    different coarse labels collapse to one box per physical object.
     """
     model = get_model()
     device = str(current_app.config.get("INFERENCE_DEVICE", "cpu"))
 
     try:
         results = model.predict(source=image_path, conf=conf_threshold,
+                                iou=_NMS_IOU, agnostic_nms=True,
                                 device=device, verbose=False)
     except Exception as exc:  # noqa: BLE001 - any inference failure is client-facing
         raise ApiError("Object localization failed.", status_code=500) from exc
