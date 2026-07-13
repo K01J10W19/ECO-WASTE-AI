@@ -417,13 +417,21 @@ Rules:
   local dummies are bypassed: per-kg factors come live from the Climatiq
   estimate endpoint (`https://api.climatiq.io/data/v1/estimate`, bearer auth,
   10 s timeout) as 1-kg probes cached via **`lru_cache(maxsize=64)` on the
-  unique (material, country, api_key) tuple** (country upper-cased pre-cache);
-  weight scaling then happens locally, keeping upstream request density
-  minimal (one call per unique factor, not per item). Materials map to
-  activity ids via `MATERIAL_TO_CLIMATIQ_ACTIVITY` (**operator note:**
-  confirm/adjust ids in the Climatiq Data Explorer for your data plan — a
-  wrong id fails loudly with the API's own message, never silently). A region
-  miss retries unscoped.
+  unique (material, country, api_key) tuple** (inputs normalised pre-cache:
+  material stripped/lower-cased, country stripped/upper-cased); weight
+  scaling then happens locally, keeping upstream request density minimal
+  (one call per unique factor, not per item). Materials map to **ORDERED
+  candidate activity ids** via `CLIMATIQ_MATERIAL_MAP` — a BEIS id
+  (GB-scoped) plus an EPA id (US-scoped) per material, all 14 verified live
+  2026-07-14; `MATERIAL_TO_CLIMATIQ_ACTIVITY` survives as the derived
+  primary-id view. The estimate selector has NO category/sector fields (those
+  are catalogue search filters) — the plural translation ("metal" →
+  "metals"/"mixed_metals") lives inside the activity id. A region miss
+  (strictly Climatiq `error_code no_emission_factors_found`) advances
+  through the candidate ids and only after ALL miss retries unscoped
+  (global); any other upstream error fails loudly with the API's own
+  message, never silently (**operator note:** confirm/adjust ids in the
+  Climatiq Data Explorer for your data plan).
 - **v3.5 UX mechanics (split-screen grid + geolocation):**
   - *Item `id` echo:* each request item may carry the client's integer `id`
     (the /predict item id keying the canvas box ↔ editable grid row); the
@@ -818,6 +826,12 @@ retraining), whereas CLIP's was editable text.
   `DUMMY_CARBON_FACTORS`, `DISPOSAL_METHOD_FACTORS`, `DISPOSAL_PATHS` and
   `EXPERT_KNOWLEDGE` stay in **lockstep** (§5) — tests enforce full 7×3 coverage.
 - γ (`PIXEL_AREA_GAMMA` = 8000) is a code constant in `carbon_service.py`, not env.
+- Climatiq estimate selectors take an **activity id only** — never add
+  category/sector fields to the payload (they're search-endpoint filters, the
+  API ignores them). Regional coverage is dataset-scoped (BEIS→GB, EPA→US), so
+  `CLIMATIQ_MATERIAL_MAP` holds ordered candidate ids per material; the
+  global fallback may fire ONLY on `error_code no_emission_factors_found` —
+  auth/quota/malformed-selector errors must stay loud 502s.
 - The audit endpoint's item `id` is the CLIENT's grid row key: echo it back
   verbatim (null when absent), never renumber, filter or reorder items
   server-side — item order in == item order out. Weight substitution goes

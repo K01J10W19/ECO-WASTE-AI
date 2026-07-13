@@ -145,15 +145,24 @@ def test_climatiq_http_error_becomes_clean_apierror(app, monkeypatch):
     assert "bad key" in str(exc.value.message)
 
 
+def _no_factor_body():
+    """Climatiq's genuine coverage-miss shape (verified live 2026-07-14)."""
+    return {"error": "bad_request",
+            "error_code": "no_emission_factors_found",
+            "message": "No emission factors could be found using the current "
+                       "query. ... relaxing ... region."}
+
+
 def test_climatiq_region_miss_falls_back_to_global_factor(app, monkeypatch):
-    # First call (region-scoped) has no published factor; the service retries
-    # without the region instead of failing the whole request.
+    # No candidate id has a MY-scoped factor: the service walks the whole
+    # candidate ladder region-scoped, then retries unscoped instead of
+    # failing the request.
     calls = []
 
     def fake_post(url, json=None, headers=None, timeout=None):
         calls.append(json["emission_factor"].get("region"))
         if json["emission_factor"].get("region"):
-            return _fake_response(400, {"message": "No emission factors could be found"})
+            return _fake_response(400, _no_factor_body())
         return _fake_response(200, {"co2e": 1.9})
 
     monkeypatch.setattr(requests, "post", fake_post)
@@ -163,9 +172,88 @@ def test_climatiq_region_miss_falls_back_to_global_factor(app, monkeypatch):
         out = cs.calculate_impact([{"material": "paper", "weight_kg": 1.0}],
                                   country="MY")
 
-    assert calls == ["MY", None]              # scoped attempt, then global retry
+    n_candidates = len(cs.CLIMATIQ_MATERIAL_MAP["paper"]["activity_ids"])
+    assert calls == ["MY"] * n_candidates + [None]   # full ladder, then global
     assert out["items"][0]["carbon_factor_kg_per_kg"] == 1.9
     assert out["provider"] == "climatiq"
+
+
+def test_climatiq_region_ladder_prefers_regional_alternate_id(app, monkeypatch):
+    # THE US-metal scenario: the BEIS primary id has no US publication, but the
+    # EPA alternate does — the user must get the genuine US-scoped factor, and
+    # the region-unscoped global fallback must NOT fire.
+    attempts = []
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        sel = json["emission_factor"]
+        attempts.append((sel["activity_id"], sel.get("region")))
+        if sel["activity_id"] == cs.CLIMATIQ_MATERIAL_MAP["metal"]["activity_ids"][0]:
+            return _fake_response(400, _no_factor_body())
+        return _fake_response(200, {"co2e": 0.0220,
+                                    "emission_factor": {"region": "US",
+                                                        "source": "EPA",
+                                                        "year": 2025}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    with app.app_context():
+        app.config["CLIMATIQ_API_KEY"] = "test-key"
+        out = cs.calculate_impact([{"material": "metal", "weight_kg": 2.0}],
+                                  country="us")   # lower-case in, normalised
+
+    primary, alternate = cs.CLIMATIQ_MATERIAL_MAP["metal"]["activity_ids"]
+    assert attempts == [(primary, "US"), (alternate, "US")]   # never unscoped
+    assert out["items"][0]["carbon_factor_kg_per_kg"] == pytest.approx(0.0220)
+    assert out["items"][0]["co2e_kg"] == pytest.approx(0.0440)
+    assert out["country"] == "US"
+
+
+def test_climatiq_non_coverage_400_fails_loudly_not_silently(app, monkeypatch):
+    # A 400 that is NOT a coverage miss (e.g. malformed selector) must raise —
+    # the fallback ladder is reserved for genuine "no factor for this region".
+    calls = []
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        calls.append(json["emission_factor"].get("region"))
+        return _fake_response(400, {"error": "bad_request",
+                                    "error_code": "invalid_request",
+                                    "message": "data_version malformed"})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    with app.app_context():
+        app.config["CLIMATIQ_API_KEY"] = "test-key"
+        with pytest.raises(ApiError) as exc:
+            cs.calculate_impact([{"material": "metal", "weight_kg": 1.0}],
+                                country="US")
+    assert exc.value.status_code == 502
+    assert "data_version malformed" in str(exc.value.message)
+    assert calls == ["US"]                    # first hard error stops the ladder
+
+
+def test_climatiq_material_map_covers_taxonomy_and_derives_alias():
+    from app.services.classification_service import MATERIAL_CLASSES
+
+    for material in MATERIAL_CLASSES:
+        cfg = cs.CLIMATIQ_MATERIAL_MAP[material]
+        ids = cfg["activity_ids"]
+        assert ids and all(isinstance(a, str) and a.startswith("waste") for a in ids)
+        # legacy alias = the primary candidate, always
+        assert cs.MATERIAL_TO_CLIMATIQ_ACTIVITY[material] == ids[0]
+
+
+def test_calculate_impact_normalizes_material_and_country(app):
+    # Stray whitespace/case from a caller must price like the canonical
+    # strings, not 400 or fork a new factor cache slot.
+    with app.app_context():
+        app.config["CLIMATIQ_API_KEY"] = ""
+        out = cs.calculate_impact([{"material": "  METAL ", "weight_kg": 1.0}],
+                                  country="us")
+
+    assert out["items"][0]["material"] == "metal"
+    assert out["items"][0]["carbon_factor_kg_per_kg"] == pytest.approx(4.50)
+    assert out["country"] == "US"
+    CalculateImpactResponse(**out)
 
 
 def test_climatiq_timeout_becomes_clean_apierror(app, monkeypatch):

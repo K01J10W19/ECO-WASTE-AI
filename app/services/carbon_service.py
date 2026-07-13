@@ -130,27 +130,70 @@ DISPOSAL_METHOD_FACTORS = {
 }
 
 # ---------------------------------------------------------------------------
-# Climatiq integration (Step 5).
+# Climatiq integration (Step 5; multi-dataset material map hardened 2026-07-14).
 #
-# Each material maps to a Climatiq activity id for end-of-life treatment.
-# NOTE for the operator: confirm/adjust these ids in the Climatiq Data
-# Explorer (https://www.climatiq.io/data) for your data plan — activity ids
-# vary by source dataset and data_version. A wrong id fails loudly with the
-# API's own message (never silently).
+# The estimate endpoint identifies a factor by ACTIVITY ID only — the request
+# has NO category/sector fields (those are catalogue *search* filters), so the
+# material-name translation ("metal" → "metals" / "mixed_metals") lives INSIDE
+# the id string. Regional coverage differs per SOURCE DATASET: BEIS publishes
+# GB-scoped waste factors, the US EPA publishes US-scoped ones, under
+# different ids. Each material therefore maps to an ORDERED tuple of official
+# candidate ids: the fetch tries every candidate with the requested region and
+# only falls back to the region-unscoped (global) factor when ALL mapped ids
+# genuinely lack that region (Climatiq error_code "no_emission_factors_found");
+# any other upstream error fails loudly.
+#
+# All 14 ids verified LIVE against data_version ^21 on 2026-07-14 with a real
+# key: the BEIS ids resolve region GB, the EPA ids resolve region US.
+# NOTE for the operator: confirm/adjust ids in the Climatiq Data Explorer
+# (https://www.climatiq.io/data) for your data plan.
 # ---------------------------------------------------------------------------
 CLIMATIQ_ESTIMATE_URL = "https://api.climatiq.io/data/v1/estimate"
+# Governs the served dataset year — deliberately UNPINNED (a "^" range) so
+# Climatiq serves the newest year in the version line (2025 at verification);
+# pinning an explicit year would go stale annually.
 CLIMATIQ_DATA_VERSION = "^21"
 CLIMATIQ_TIMEOUT_S = 10
-# All seven ids verified LIVE against data_version ^21 (BEIS GB dataset,
-# landfill end-of-life) on 2026-07-10 with a real key — factors resolve.
+# Climatiq's "this selector matched nothing" code — the ONLY error allowed to
+# advance the candidate/region fallback ladder (everything else raises).
+_CLIMATIQ_NO_FACTOR_CODE = "no_emission_factors_found"
+
+CLIMATIQ_MATERIAL_MAP = {
+    "biodegradable": {"activity_ids": (
+        "waste-type_organic_food_and_drink-disposal_method_landfill",   # BEIS (GB)
+        "waste-type_food_waste-disposal_method_landfilled",             # EPA  (US)
+    )},
+    "cardboard": {"activity_ids": (
+        "waste-type_cardboard-disposal_method_landfill",                # BEIS (GB)
+        "waste-type_corrugated_containers-disposal_method_landfilled",  # EPA  (US)
+    )},
+    "glass": {"activity_ids": (
+        "waste-type_glass-disposal_method_landfill",                    # BEIS (GB)
+        "waste-type_glass-disposal_method_landfilled",                  # EPA  (US)
+    )},
+    "metal": {"activity_ids": (
+        "waste-type_metals-disposal_method_landfill",                   # BEIS (GB)
+        "waste-type_mixed_metals-disposal_method_landfilled",           # EPA  (US)
+    )},
+    "paper": {"activity_ids": (
+        "waste-type_paper-disposal_method_landfill",                    # BEIS (GB)
+        "waste-type_mixed_paper_general-disposal_method_landfilled",    # EPA  (US)
+    )},
+    "plastic": {"activity_ids": (
+        "waste-type_plastics-disposal_method_landfill",                 # BEIS (GB)
+        "waste-type_mixed_plastics-disposal_method_landfilled",         # EPA  (US)
+    )},
+    "general rubbish": {"activity_ids": (
+        "waste-type_household_residual_waste-disposal_method_landfill", # BEIS (GB)
+        "waste-type_mixed_msw-disposal_method_landfilled",              # EPA  (US)
+    )},
+}
+
+# Legacy single-id view (the PRIMARY candidate per material) — derived, kept
+# for tests/external references; CLIMATIQ_MATERIAL_MAP is the source of truth.
 MATERIAL_TO_CLIMATIQ_ACTIVITY = {
-    "biodegradable": "waste-type_organic_food_and_drink-disposal_method_landfill",
-    "cardboard": "waste-type_cardboard-disposal_method_landfill",
-    "glass": "waste-type_glass-disposal_method_landfill",
-    "metal": "waste-type_metals-disposal_method_landfill",
-    "paper": "waste-type_paper-disposal_method_landfill",
-    "plastic": "waste-type_plastics-disposal_method_landfill",
-    "general rubbish": "waste-type_household_residual_waste-disposal_method_landfill",
+    material: cfg["activity_ids"][0]
+    for material, cfg in CLIMATIQ_MATERIAL_MAP.items()
 }
 
 
@@ -168,59 +211,92 @@ def _fetch_climatiq_factor(material: str, country: str, api_key: str) -> float:
 
     Asks the estimate endpoint for exactly 1 kg, so the result IS the per-kg
     factor; weighted items are then scaled locally without further calls.
-    ``country`` scopes the emission factor region when provided ('' = global).
-    Raises ``ApiError`` on any upstream problem (auth, unknown activity id,
-    timeout, network) with a user-facing message.
+    ``country`` scopes the emission factor region when provided ('' = global)
+    and MUST arrive normalised (stripped, upper-cased — ``_resolve_factor``
+    guarantees this before the cache key is formed).
+
+    Resolution ladder (per the multi-dataset map): every candidate activity id
+    for the material is tried WITH the requested region; a candidate only
+    advances the ladder on Climatiq's genuine coverage miss
+    (``no_emission_factors_found``). When all mapped ids lack the region, the
+    fetch falls back to the region-unscoped (global) factor. Any OTHER
+    upstream problem (auth, quota, malformed selector, timeout, network)
+    raises ``ApiError`` immediately — never a silent fallback.
     """
     import requests  # local import keeps module import light for tests
 
-    selector = {
-        "activity_id": MATERIAL_TO_CLIMATIQ_ACTIVITY[material],
-        "data_version": CLIMATIQ_DATA_VERSION,
-    }
-    if country:
-        selector["region"] = country.upper()
-    payload = {
-        "emission_factor": selector,
-        "parameters": {"weight": 1, "weight_unit": "kg"},
-    }
-    try:
-        resp = requests.post(
-            CLIMATIQ_ESTIMATE_URL,
-            json=payload,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=CLIMATIQ_TIMEOUT_S,
-        )
-    except requests.exceptions.RequestException as exc:
-        raise ApiError("Carbon provider (Climatiq) is unreachable — try again "
-                       "later or remove the API key to use local estimates.",
-                       status_code=502) from exc
-
-    if resp.status_code != 200:
-        detail = ""
+    candidates = CLIMATIQ_MATERIAL_MAP[material]["activity_ids"]
+    last_detail = ""
+    for activity_id in candidates:
+        selector = {
+            "activity_id": activity_id,
+            "data_version": CLIMATIQ_DATA_VERSION,
+        }
+        if country:
+            selector["region"] = country
+        payload = {
+            "emission_factor": selector,
+            "parameters": {"weight": 1, "weight_unit": "kg"},
+        }
         try:
-            detail = str(resp.json().get("message", ""))[:200]
+            resp = requests.post(
+                CLIMATIQ_ESTIMATE_URL,
+                json=payload,
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=CLIMATIQ_TIMEOUT_S,
+            )
+        except requests.exceptions.RequestException as exc:
+            raise ApiError("Carbon provider (Climatiq) is unreachable — try "
+                           "again later or remove the API key to use local "
+                           "estimates.", status_code=502) from exc
+
+        if resp.status_code == 200:
+            try:
+                body = resp.json()
+                co2e = float(body["co2e"])
+            except Exception as exc:  # noqa: BLE001 - malformed upstream payload
+                raise ApiError("Climatiq returned an unexpected response shape.",
+                               status_code=502) from exc
+            served = body.get("emission_factor") or {}
+            logger.info(
+                "Climatiq factor %s (%s): %.4f kgCO2e/kg via %s "
+                "[served region=%s source=%s year=%s]",
+                material, country or "global", co2e, activity_id,
+                served.get("region"), served.get("source"), served.get("year"))
+            return co2e
+
+        detail, error_code = "", ""
+        try:
+            body = resp.json()
+            detail = str(body.get("message", ""))[:200]
+            error_code = str(body.get("error_code", ""))
         except Exception:  # noqa: BLE001 - body may not be JSON
             pass
-        # Region miss (e.g. no BEIS factor published for "MY"): fall back to
-        # the region-unscoped factor rather than failing the whole request.
-        if resp.status_code == 400 and country:
-            logger.warning("Climatiq has no '%s' factor for region %s; "
-                           "falling back to the global factor.", material, country)
-            return _fetch_climatiq_factor(material, "", api_key)
+        # ONLY a genuine coverage miss may advance the ladder — a malformed
+        # payload, bad key or quota problem must fail loudly, not silently
+        # degrade to a factor the user did not ask for.
+        if resp.status_code == 400 and error_code == _CLIMATIQ_NO_FACTOR_CODE:
+            last_detail = detail
+            logger.debug("Climatiq: no factor for %s via %s (region %s); "
+                         "trying next candidate id.",
+                         material, activity_id, country or "global")
+            continue
         raise ApiError(f"Climatiq rejected the request for '{material}' "
                        f"(HTTP {resp.status_code}). {detail}".strip(),
                        status_code=502)
 
-    try:
-        co2e = float(resp.json()["co2e"])
-    except Exception as exc:  # noqa: BLE001 - malformed upstream payload
-        raise ApiError("Climatiq returned an unexpected response shape.",
-                       status_code=502) from exc
+    if country:
+        # Every officially mapped id genuinely lacks this region — retry the
+        # whole ladder unscoped so Climatiq serves its best global factor.
+        logger.warning(
+            "Climatiq publishes no '%s' factor for region %s under any mapped "
+            "activity id (%s); falling back to the region-unscoped (global) "
+            "factor.", material, country, ", ".join(candidates))
+        return _fetch_climatiq_factor(material, "", api_key)
 
-    logger.info("Climatiq factor %s (%s): %.4f kgCO2e/kg",
-                material, country or "global", co2e)
-    return co2e
+    raise ApiError(f"Climatiq has no emission factor for '{material}' under "
+                   f"the mapped activity ids. {last_detail}".strip(),
+                   status_code=502)
 
 
 def get_carbon_factor(label: str) -> float:
@@ -241,13 +317,17 @@ def get_carbon_factor(label: str) -> float:
 def _resolve_factor(label: str, country: str) -> tuple:
     """(per-kg factor, source) — Climatiq when configured+mapped, else dummy.
 
-    ``country`` is normalised (upper-cased, '' when absent) BEFORE the cached
-    probe so "my" and "MY" share one cache slot; an empty value omits the
-    region selector entirely and Climatiq falls back to its global dataset.
+    Both inputs are normalised BEFORE the cached probe so stray whitespace/case
+    variants (" Metal ", "my") share one cache slot and one upstream request:
+    material is stripped + lower-cased against the map keys, country is
+    stripped + upper-cased ('' when absent — omitting the region selector so
+    Climatiq resolves against its global dataset).
     """
+    label = str(label or "").strip().lower()
+    country = str(country or "").strip().upper()
     api_key = _climatiq_api_key()
-    if api_key and label in MATERIAL_TO_CLIMATIQ_ACTIVITY:
-        return _fetch_climatiq_factor(label, (country or "").upper(), api_key), "climatiq"
+    if api_key and label in CLIMATIQ_MATERIAL_MAP:
+        return _fetch_climatiq_factor(label, country, api_key), "climatiq"
     return get_carbon_factor(label), "local_dummy"
 
 
@@ -375,7 +455,10 @@ def calculate_impact(items: list, country: str = None) -> dict:
     results, total = [], 0.0
     sources = set()
     for entry in items:
-        material = entry["material"]
+        # Normalise before the taxonomy check so stray whitespace/case from a
+        # caller can never masquerade as an unknown material or a fresh cache
+        # slot ("  METAL " prices exactly like "metal").
+        material = str(entry["material"]).strip().lower()
         if material not in MATERIAL_CLASSES:
             raise ApiError(
                 f"Unknown material '{material}'. Valid materials: "
@@ -401,7 +484,7 @@ def calculate_impact(items: list, country: str = None) -> dict:
     return {
         "items": results,
         "total_co2e_kg": round(total, 4),
-        "country": country.upper() if country else None,
+        "country": (country or "").strip().upper() or None,
         "provider": "climatiq" if sources == {"climatiq"} else
                     ("local_dummy" if sources == {"local_dummy"} else "mixed"),
     }
