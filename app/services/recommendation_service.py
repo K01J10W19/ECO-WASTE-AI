@@ -281,6 +281,10 @@ _LLM_TEMPERATURE = 0.5
 # A read TIMEOUT is never retried: that budget is already spent.
 _LLM_MAX_ATTEMPTS = 3
 _LLM_RETRY_BACKOFF_S = (2.0, 5.0)   # sleep before attempt 2, attempt 3
+# Quality floor: some models over-compress into telegram fragments
+# ("Great, rank 1!") — fields shorter than this many words are rejected,
+# which triggers a retry and, if persistent, the local grid.
+_LLM_MIN_FIELD_WORDS = 5
 
 LLM_SYSTEM_PROMPT = """\
 You are the friendly, plain-spoken voice of a family waste-sorting app.
@@ -299,7 +303,12 @@ For EVERY path of EVERY item write exactly three fields:
 3. "environmental_cons" — a stark but 100% truthful long-term consequence.
 
 HARD RULES
-- 1-2 punchy sentences per field. MAXIMUM 25 words per field.
+- Each field is 1-2 COMPLETE sentences, 8 to 25 words. NEVER telegram
+  fragments ("Great, rank 1!") and NEVER the word "None" alone — every
+  field must say something real and specific.
+- Field jobs: the verdict carries the feeling AND the numbers; the pros
+  paint the everyday benefit in plain images (do NOT just repeat the kg
+  figure); the cons describe one concrete long-term harm.
 - Words a child knows. NEVER use jargon like "carbon-negative", "offset",
   "displace", "biogenic", "anaerobic decomposition", "leachate", "CO2e",
   "emission factor". Prefer everyday images: "planet-warming gas",
@@ -315,6 +324,14 @@ HARD RULES
   "environmental_cons":"..."}]}]}
   Cover every item and every path exactly once, keeping the given
   "method" ids and "index" values unchanged.
+
+EXAMPLE of ONE well-written path — match this quality and length:
+{"method":"recycling","encouraging_verdict":"Amazing pick — rank 1!
+Recycling this saves 1.7 kg of planet-warming gas, like switching off the
+lights for a whole week.","environmental_pros":"Old bottles become new
+ones, so factories burn less oil and beaches stay clean.",
+"environmental_cons":"Dirty or greasy plastic spoils the whole batch and
+ends up dumped instead."}
 """
 
 
@@ -549,8 +566,9 @@ def _generate_and_apply(results: list, country: str,
             for field in ("encouraging_verdict", "environmental_pros",
                           "environmental_cons"):
                 value = str(gen[field]).strip()
-                if not value:
-                    raise ValueError(f"LLM returned an empty '{field}'")
+                if len(value.split()) < _LLM_MIN_FIELD_WORDS:
+                    raise ValueError(
+                        f"LLM '{field}' below the quality floor: {value!r}")
                 staged.append((path, field, value))
     for path, field, value in staged:        # atomic: only after FULL validation
         path[field] = value

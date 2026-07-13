@@ -353,6 +353,33 @@ def test_llm_timeout_is_not_retried(app, monkeypatch):
     assert out["provider"] == "local_fallback"
 
 
+def test_llm_telegram_fragments_fail_the_quality_floor(app, monkeypatch):
+    # Observed live on llama-3.3: fields compressed to "Great, rank 1!" /
+    # "None" — below the minimum-words floor they are rejected and the
+    # local grid (full sentences) is served instead.
+    monkeypatch.setattr(rs.time, "sleep", lambda _s: None)   # no real backoff
+
+    def terse_post(url, json=None, headers=None, timeout=None):
+        ctx = jsonlib.loads(json["messages"][1]["content"])
+        return _llm_http_response(200, jsonlib.dumps({"items": [
+            {"index": item["index"], "paths": [
+                {"method": p["method"], "encouraging_verdict": "Great, rank 1!",
+                 "environmental_pros": "Saves 1.7 kg",
+                 "environmental_cons": "None"}
+                for p in item["paths"]]}
+            for item in ctx["items"]]}))
+
+    monkeypatch.setattr(requests, "post", terse_post)
+
+    with app.app_context():
+        app.config["LLM_API_KEY"] = "k"
+        out = rs.recommend_for_items([{"material": "plastic", "weight_kg": 0.5}])
+
+    assert out["provider"] == "local_fallback"
+    for path in out["items"][0]["recommendations"]:
+        assert len(path["encouraging_verdict"].split()) >= 5   # real sentences
+
+
 def test_llm_garbage_output_falls_back(app, monkeypatch):
     monkeypatch.setattr(rs.time, "sleep", lambda _s: None)   # no real backoff
     monkeypatch.setattr(requests, "post",
