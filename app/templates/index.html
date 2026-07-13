@@ -506,6 +506,24 @@
     50% { opacity: 0.65; box-shadow: 0 0 0 5px rgba(20,184,166,0); }
   }
   .pulse-dot { animation: pulse-dot 2.2s ease-in-out infinite; }
+  /* Apple-style confidence pill slider (browser-native range, restyled) */
+  #conf-slider {
+    -webkit-appearance: none; appearance: none;
+    width: 96px; height: 4px; border-radius: 999px; outline: none; cursor: pointer;
+    background: linear-gradient(90deg, #14b8a6 var(--fill, 50%), #e4e4e7 var(--fill, 50%));
+  }
+  #conf-slider::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 14px; height: 14px; border-radius: 999px; background: #ffffff;
+    border: 1px solid rgba(24,24,27,0.12); box-shadow: 0 1px 4px rgba(24,24,27,0.25);
+    transition: transform .15s ease;
+  }
+  #conf-slider::-webkit-slider-thumb:hover { transform: scale(1.15); }
+  #conf-slider::-moz-range-thumb {
+    width: 14px; height: 14px; border-radius: 999px; background: #ffffff;
+    border: 1px solid rgba(24,24,27,0.12); box-shadow: 0 1px 4px rgba(24,24,27,0.25);
+  }
+  #conf-slider::-moz-range-track { height: 4px; border-radius: 999px; background: transparent; }
   /* GSAP orchestration hooks */
   .gsap-root, .gsap-panel-left, .gsap-panel-right, .gsap-telemetry, .gsap-card, .gsap-stagger-item, .gsap-badge { will-change: transform, opacity; }
 </style>
@@ -541,9 +559,15 @@
           <span id="geo-name" class="text-xs text-zinc-500 shrink-0"></span>
         </div>
 
+        <!-- Confidence filter pill (top-right, mirrors the geo badge) -->
+        <div id="conf-pill" class="absolute top-4 right-4 z-20 flex items-center gap-2.5 rounded-full border border-zinc-200/80 bg-white/80 backdrop-blur-md pl-3.5 pr-4 py-2 whitespace-nowrap gsap-badge">
+          <span class="font-mono-d text-[10px] tracking-[0.18em] text-zinc-400 uppercase shrink-0">Min conf: <span id="conf-value" class="text-zinc-900 font-bold tabular-nums">0.50</span></span>
+          <input id="conf-slider" type="range" min="0" max="1" step="0.05" value="0.50" aria-label="Minimum confidence filter">
+        </div>
+
         <!-- Detection count footer -->
         <div class="absolute bottom-4 left-4 z-20 flex items-center gap-3 rounded-lg border border-zinc-200/80 bg-white/85 backdrop-blur-md px-3.5 py-1.5">
-          <span class="font-mono-d text-[11px] text-zinc-500"><span id="object-count" class="text-teal-600 font-semibold">0</span> objects · click a box to inspect</span>
+          <span class="font-mono-d text-[11px] text-zinc-500"><span id="object-count" class="text-teal-600 font-semibold">0</span> objects<span id="filtered-note" class="hidden text-amber-600"></span> · click a box to inspect</span>
           <button id="new-scan-btn" class="hidden font-mono-d text-[11px] font-semibold text-teal-600 hover:text-teal-500 transition-colors duration-200">↺ NEW SCAN</button>
         </div>
 
@@ -711,6 +735,7 @@ const state = {
   recs: {},                 // id -> {paths: [3 ranked], provider}
   process: {},              // id -> selected method key
   activeId: null,
+  minConf: 0.5,             // confidence pill threshold — client-side VIEW filter
   country: "MY",
   geoMode: "AUTO-GEO",
   reveal: 1,                // gsap-driven box draw-in progress
@@ -763,6 +788,27 @@ function itemCo2(it) {
 }
 function co2Color(v) {
   return v > ALERT_KG ? (v > ALERT_KG * 2 ? "#f43f5e" : "#f59e0b") : "#14b8a6";
+}
+// Confidence pill: pure view-layer filter — API payloads always carry ALL
+// items; only the canvas, the grid and the telemetry sums react.
+function isVisible(it) { return it.confidence >= state.minConf - 1e-9; }
+function visibleItems() { return state.items.filter(isVisible); }
+
+function applyConfFilter() {
+  document.querySelectorAll("#items-list .item-card").forEach(card => {
+    const it = state.items.find(x => x.id === +card.dataset.id);
+    card.classList.toggle("hidden", !!it && !isVisible(it));
+  });
+  const total = state.items.length;
+  const vis = visibleItems().length;
+  $("object-count").textContent = vis;
+  const note = $("filtered-note");
+  if (total && vis < total) {
+    note.textContent = ` (+${total - vis} filtered)`;
+    note.classList.remove("hidden");
+  } else {
+    note.classList.add("hidden");
+  }
 }
 
 /* ------------------------------ country / geo ------------------------------ */
@@ -976,16 +1022,17 @@ async function refreshRecommendations() {
 /* ------------------------------ telemetry ------------------------------ */
 
 function updateTelemetry() {
-  const items = state.items;
-  const total = state.auditMeta.total ??
-    items.reduce((s, it) => s + itemCo2(it), 0);
+  // Sums run over the VISIBLE set only — the confidence pill subtracts
+  // filtered-out items from the whole dashboard in real time.
+  const items = visibleItems();
+  const total = items.reduce((s, it) => s + itemCo2(it), 0);
   const mass = items.reduce((s, it) => s + itemWeight(it), 0);
   const recyclable = items.length
     ? Math.round(100 * items.filter(it => RECYCLABLE.has(it.class_name)).length / items.length)
     : 0;
 
   gsap.to(carbonShown, {
-    v: total, duration: 0.9, ease: "power3.out",
+    v: total, duration: 0.9, ease: "power3.out", overwrite: true,
     onUpdate: () => { $("carbon-number").textContent = carbonShown.v.toFixed(3); },
   });
   $("km-equiv").textContent = (total * KM_PER_KG).toFixed(1);
@@ -996,14 +1043,20 @@ function updateTelemetry() {
     ? `${state.auditMeta.provider} · ${state.country}` : "local (γ proxy)";
 
   const chip = $("status-chip");
-  if (!items.length) {
+  const base = "rounded-full border px-2.5 py-1 text-[10px] font-mono-d tracking-wider uppercase text-center whitespace-nowrap shrink-0 flex items-center justify-center ";
+  if (!state.items.length) {
     chip.textContent = "AWAITING SCAN";
-    chip.className = "rounded-full border px-2.5 py-1 text-[10px] font-mono-d tracking-wider uppercase text-center whitespace-nowrap shrink-0 flex items-center justify-center border-teal-200/80 bg-teal-50 text-teal-700";
+    chip.className = base + "border-teal-200/80 bg-teal-50 text-teal-700";
+    return;
+  }
+  if (!items.length) {
+    chip.textContent = "ALL FILTERED";
+    chip.className = base + "border-amber-200/80 bg-amber-50 text-amber-600";
     return;
   }
   const elevated = items.some(it => itemCo2(it) > ALERT_KG);
   chip.textContent = elevated ? "ELEVATED IMPACT" : "LOW IMPACT";
-  chip.className = "rounded-full border px-2.5 py-1 text-[10px] font-mono-d tracking-wider uppercase text-center whitespace-nowrap shrink-0 flex items-center justify-center "
+  chip.className = base
     + (elevated ? "border-amber-200/80 bg-amber-50 text-amber-600"
                 : "border-teal-200/80 bg-teal-50 text-teal-700");
 }
@@ -1138,6 +1191,8 @@ function renderItems() {
       });
     });
   });
+
+  applyConfFilter();   // fresh DOM — re-apply the confidence view filter
 }
 
 let refreshTimer = null;
@@ -1179,9 +1234,10 @@ function hitTest(e) {
   const rect = getImgRect(r.width, r.height);
   const px = ((e.clientX - r.left) - rect.x) / rect.w * state.imgW;
   const py = ((e.clientY - r.top) - rect.y) / rect.h * state.imgH;
-  // smallest box wins on overlap (same rule as the Test Brain page)
+  // smallest box wins on overlap; confidence-filtered boxes are untouchable
   return state.items
-    .filter(it => px >= it.bbox[0] && px <= it.bbox[2] && py >= it.bbox[1] && py <= it.bbox[3])
+    .filter(it => isVisible(it)
+      && px >= it.bbox[0] && px <= it.bbox[2] && py >= it.bbox[1] && py <= it.bbox[3])
     .sort((a, b) => a.box_area_px - b.box_area_px)[0] || null;
 }
 
@@ -1231,6 +1287,7 @@ function draw() {
   const reveal = state.reveal;
 
   state.items.forEach(it => {
+    if (!isVisible(it)) return;   // hidden by the confidence pill
     const active = state.activeId === it.id;
     const co2 = itemCo2(it);
     const color = co2Color(co2);
@@ -1290,13 +1347,27 @@ document.addEventListener("DOMContentLoaded", () => {
   geolocate();
   draw();
 
+  // Confidence pill: 0 ms client-side filtering — no network, pure view.
+  const slider = $("conf-slider");
+  const syncFill = () =>
+    slider.style.setProperty("--fill", (parseFloat(slider.value) * 100) + "%");
+  syncFill();
+  slider.addEventListener("input", () => {
+    state.minConf = parseFloat(slider.value);
+    $("conf-value").textContent = state.minConf.toFixed(2);
+    syncFill();
+    applyConfFilter();    // grid cards collapse/reappear instantly
+    updateTelemetry();    // totals self-audit against the visible set
+    draw();               // boxes vanish/return on the canvas
+  });
+
   // GSAP intro orchestration.
   const tl = gsap.timeline({ defaults: { ease: "power2.out" } });
   tl.from("header", { y: -16, opacity: 0, duration: 0.5 })
     .from(".gsap-panel-left", { x: -24, opacity: 0, duration: 0.55 }, "-=0.25")
     .from(".gsap-panel-right", { x: 24, opacity: 0, duration: 0.55 }, "<")
     .from(".gsap-telemetry, .gsap-card", { y: 20, opacity: 0, duration: 0.5, stagger: 0.09 }, "-=0.3")
-    .from("#geo-badge", { scale: 0.85, opacity: 0, duration: 0.45, ease: "back.out(2)" }, "-=0.2");
+    .from(".gsap-badge", { scale: 0.85, opacity: 0, duration: 0.45, ease: "back.out(2)", stagger: 0.12 }, "-=0.2");
 });
 </script>
 </body>
