@@ -62,6 +62,7 @@ from flask import current_app, has_app_context
 from app.services.carbon_service import (
     estimate_disposal_impact,
     get_disposal_factor,
+    get_national_profile,
     resolve_effective_weight,
 )
 from app.services.classification_service import DISPLAY_NAMES, MATERIAL_CLASSES
@@ -373,32 +374,56 @@ def _build_verdict(rank: int, material: str, method: str,
             f"choice. Pick better if you can!")
 
 
-def simulate_disposal_paths(material: str, weight_kg: float, _pool=None) -> list:
+def _build_restricted_verdict(method: str, reason: str) -> str:
+    """Deterministic policy copy for a nationally unavailable path (<= 25
+    words, same hyper-simple register). Never LLM-rewritten — applicability
+    is infrastructure fact, not narrative."""
+    meth = METHOD_DISPLAY_NAMES.get(method, method.replace("_", " ").title())
+    return f"{meth} is not an option where you live — {reason}."
+
+
+def simulate_disposal_paths(material: str, weight_kg: float, _pool=None,
+                            country: str = None) -> list:
     """
     Fork one item into its 3 taxonomy-branched end-of-life simulations,
-    evaluate them IN PARALLEL, then rank ascending by net CO2e.
+    evaluate them IN PARALLEL, then rank ascending by net CO2e — EXCLUSIVELY
+    among the paths the ``country``'s national infrastructure actually
+    operates (v3.7 applicability matrix).
 
-    Returns the ranked, fully annotated recommendation array::
+    Returns the fully annotated recommendation array: applicable paths first
+    (rank 1..K ascending), then any nationally banned paths::
 
         [
           {
             "method": "recycling",
             "method_display": "Recycling",
-            "rank": 1,                       # 1 = optimal ... 3 = worst baseline
+            "rank": 1,                       # 1 = optimal (among APPLICABLE)
             "status_tag": "Optimal",         # Optimal | Acceptable | Warning
+            "is_applicable": true,           # national infrastructure verdict
+            "restriction_reason": null,      # set iff is_applicable is false
             "carbon_factor_kg_per_kg": -1.08,  # net factor (negative = credit)
             "carbon_impact_kg": -0.54,       # factor x weight (may be negative)
             "encouraging_verdict": "...",    # rank-aware supportive copy
             "environmental_pros": "...",     # knowledge grid benefit
             "environmental_cons": "..."      # knowledge grid long-term cost
           },
-          ... rank 2, rank 3 ...
+          ...,
+          { "method": "landfill", "rank": null, "status_tag": null,
+            "is_applicable": false, "restriction_reason": "Singapore ...", ... }
         ]
 
+    Banned paths (e.g. landfill in zero-landfill Singapore) keep their priced
+    CO2e for transparency but are the SUPREME BARRIER's casualties: rank and
+    status_tag are None, their verdict is a fixed policy statement, and they
+    never participate in ranking, verdict deltas, savings or summaries. If a
+    profile were ever to ban EVERY path of a branch, the engine fails open
+    (all paths applicable) rather than returning an unrankable item.
+
     Text fields carry the LOCAL knowledge-grid copy; the LLM layer in
-    ``recommend_for_items`` may overwrite them (text only — numbers, ranks
-    and method ids are immutable). Ties (which the current matrix never
-    produces) fall back to method-name order so ranking stays deterministic.
+    ``recommend_for_items`` may overwrite them for APPLICABLE paths only
+    (text only — numbers, ranks and method ids are immutable). Ties (which
+    the current matrix never produces) fall back to method-name order so
+    ranking stays deterministic.
     """
     if material not in MATERIAL_CLASSES:
         raise ApiError(
@@ -411,7 +436,8 @@ def simulate_disposal_paths(material: str, weight_kg: float, _pool=None) -> list
 
     if _pool is None:
         with ThreadPoolExecutor(max_workers=_PARALLEL_PATHS) as pool:
-            return simulate_disposal_paths(material, weight_kg, _pool=pool)
+            return simulate_disposal_paths(material, weight_kg, _pool=pool,
+                                           country=country)
 
     methods = DISPOSAL_PATHS[material]
     # Parallel fan-out: each end-of-life path is priced concurrently by the
@@ -421,8 +447,21 @@ def simulate_disposal_paths(material: str, weight_kg: float, _pool=None) -> list
         methods,
     ))
 
-    # SORTING ENGINE: ascending net CO2e — deepest offset / lowest burden wins.
-    outcomes = sorted(zip(methods, co2e_values), key=lambda mc: (mc[1], mc[0]))
+    # APPLICABILITY PRE-FILTER (the supreme barrier): split the priced paths
+    # by the country's national infrastructure profile BEFORE any ranking.
+    profile = get_national_profile(country)
+    banned = profile.get("banned_methods", frozenset())
+    applicable = [(m, c) for m, c in zip(methods, co2e_values) if m not in banned]
+    restricted = [(m, c) for m, c in zip(methods, co2e_values) if m in banned]
+    if not applicable:   # a profile must never leave an item unrankable
+        logger.warning("National profile for %r bans every %s path — "
+                       "failing open (all paths applicable).",
+                       country, material)
+        applicable, restricted = list(zip(methods, co2e_values)), []
+
+    # SORTING ENGINE: ascending net CO2e among APPLICABLE paths only —
+    # deepest offset / lowest burden wins.
+    outcomes = sorted(applicable, key=lambda mc: (mc[1], mc[0]))
     best_co2e, worst_co2e = outcomes[0][1], outcomes[-1][1]
 
     ranked = []
@@ -434,10 +473,32 @@ def simulate_disposal_paths(material: str, weight_kg: float, _pool=None) -> list
                 method, method.replace("_", " ").title()),
             "rank": rank,
             "status_tag": STATUS_TAGS[rank],
+            "is_applicable": True,
+            "restriction_reason": None,
             "carbon_factor_kg_per_kg": get_disposal_factor(material, method),
             "carbon_impact_kg": co2e_kg,
             "encouraging_verdict": _build_verdict(
                 rank, material, method, co2e_kg, best_co2e, worst_co2e),
+            "environmental_pros": knowledge["pros"],
+            "environmental_cons": knowledge["cons"],
+        })
+
+    # Nationally banned paths ride LAST: numbers preserved for transparency,
+    # rank/status stripped so no consumer can mistake them for choices.
+    for method, co2e_kg in sorted(restricted):
+        knowledge = EXPERT_KNOWLEDGE[material][method]
+        ranked.append({
+            "method": method,
+            "method_display": METHOD_DISPLAY_NAMES.get(
+                method, method.replace("_", " ").title()),
+            "rank": None,
+            "status_tag": None,
+            "is_applicable": False,
+            "restriction_reason": profile.get("reason", "not available"),
+            "carbon_factor_kg_per_kg": get_disposal_factor(material, method),
+            "carbon_impact_kg": co2e_kg,
+            "encouraging_verdict": _build_restricted_verdict(
+                method, profile.get("reason", "not available")),
             "environmental_pros": knowledge["pros"],
             "environmental_cons": knowledge["cons"],
         })
@@ -454,34 +515,42 @@ def _llm_settings() -> tuple:
             str(cfg.get("LLM_API_URL", "") or ""))
 
 
+def _applicable_paths(item: dict) -> list:
+    """The nationally applicable (rank-carrying) subset, rank order."""
+    return [p for p in item["recommendations"] if p["is_applicable"]]
+
+
 def _llm_context(results: list, country: str) -> dict:
-    """The read-only numeric context the LLM writes prose around."""
-    return {
-        "country": country or "global average",
-        "items": [
-            {
-                "index": idx,
-                "material": item["display_name"],
-                "weight_kg": item["effective_weight_kg"],
-                "paths": [
-                    {
-                        "method": path["method"],
-                        "rank": path["rank"],
-                        "status_tag": path["status_tag"],
-                        "carbon_impact_kg": path["carbon_impact_kg"],
-                        "saving_vs_worst_kg": round(
-                            item["recommendations"][-1]["carbon_impact_kg"]
-                            - path["carbon_impact_kg"], 4),
-                        "extra_vs_best_kg": round(
-                            path["carbon_impact_kg"]
-                            - item["recommendations"][0]["carbon_impact_kg"], 4),
-                    }
-                    for path in item["recommendations"]
-                ],
-            }
-            for idx, item in enumerate(results)
-        ],
-    }
+    """The read-only numeric context the LLM writes prose around.
+
+    Nationally banned paths are EXCLUDED: their verdict is a fixed policy
+    statement, and every comparative delta here is computed strictly inside
+    the applicable pool (rank-1 best vs rank-K worst).
+    """
+    items = []
+    for idx, item in enumerate(results):
+        pool = _applicable_paths(item)
+        best_kg = pool[0]["carbon_impact_kg"]
+        worst_kg = pool[-1]["carbon_impact_kg"]
+        items.append({
+            "index": idx,
+            "material": item["display_name"],
+            "weight_kg": item["effective_weight_kg"],
+            "paths": [
+                {
+                    "method": path["method"],
+                    "rank": path["rank"],
+                    "status_tag": path["status_tag"],
+                    "carbon_impact_kg": path["carbon_impact_kg"],
+                    "saving_vs_worst_kg": round(
+                        worst_kg - path["carbon_impact_kg"], 4),
+                    "extra_vs_best_kg": round(
+                        path["carbon_impact_kg"] - best_kg, 4),
+                }
+                for path in pool
+            ],
+        })
+    return {"country": country or "global average", "items": items}
 
 
 def _extract_json(text: str) -> dict:
@@ -562,6 +631,8 @@ def _generate_and_apply(results: list, country: str,
     for idx, item in enumerate(results):
         by_method = {p["method"]: p for p in by_index[idx]["paths"]}
         for path in item["recommendations"]:
+            if not path["is_applicable"]:
+                continue   # banned paths keep their deterministic policy copy
             gen = by_method[path["method"]]   # KeyError -> fallback upstream
             for field in ("encouraging_verdict", "environmental_pros",
                           "environmental_cons"):
@@ -582,13 +653,16 @@ def recommend_for_items(items: list, country: str = None) -> dict:
     "box_area_px": float?}`` dicts (type-validated by the pydantic schema at
     the route; each needs at least one of the two size fields). ``country``
     (optional ISO alpha-2, typically the frontend's IP-geolocated default)
-    only flavours the v3.6 LLM text layer — the numbers stay identical.
+    does two things: it drives the v3.7 NATIONAL INFRASTRUCTURE applicability
+    matrix (which end-of-life routes exist there at all) and it flavours the
+    v3.6 LLM text layer. The per-path CO2e arithmetic itself never changes.
     Returns::
 
         {
           "items": [
             { material, display_name, effective_weight_kg, weight_source,
-              best_method, max_saving_kg, recommendations: [3 ranked paths] }
+              best_method, max_saving_kg, recommendations: [3 paths —
+              applicable ranked first, banned flagged is_applicable=false] }
           ],
           "summary": { item_count, optimal_total_co2e_kg,
                        worst_total_co2e_kg, max_saving_kg },
@@ -600,9 +674,13 @@ def recommend_for_items(items: list, country: str = None) -> dict:
     text fields; ``local_knowledge_base`` = no LLM key configured (the
     deterministic default); ``local_fallback`` = an LLM was configured but
     failed (rate limit, timeout, bad output) and the local grid took over
-    seamlessly. The summary compares "user follows every rank-1 path"
-    against "every rank-3 path" — totals may be NEGATIVE (net offsets).
+    seamlessly. ``best_method``, ``max_saving_kg`` and the summary compare
+    "user follows every rank-1 path" against "every worst APPLICABLE path" —
+    nationally banned paths never enter the subtraction, and totals may be
+    NEGATIVE (net offsets).
     """
+    country_code = str(country or "").strip().upper() or None
+
     results = []
     optimal_total = 0.0
     worst_total = 0.0
@@ -612,22 +690,25 @@ def recommend_for_items(items: list, country: str = None) -> dict:
         for entry in items:
             material = entry["material"]
             weight_kg, weight_source = resolve_effective_weight(entry)
-            ranked = simulate_disposal_paths(material, weight_kg, _pool=pool)
+            ranked = simulate_disposal_paths(material, weight_kg, _pool=pool,
+                                             country=country_code)
 
-            optimal_total += ranked[0]["carbon_impact_kg"]
-            worst_total += ranked[-1]["carbon_impact_kg"]
+            # All comparative math draws STRICTLY from the applicable pool
+            # (rank order: pool[0] = Optimal, pool[-1] = worst valid choice).
+            pool_paths = [p for p in ranked if p["is_applicable"]]
+            optimal_total += pool_paths[0]["carbon_impact_kg"]
+            worst_total += pool_paths[-1]["carbon_impact_kg"]
             results.append({
                 "material": material,
                 "display_name": _display_material(material),
                 "effective_weight_kg": round(weight_kg, 4),
                 "weight_source": weight_source,
-                "best_method": ranked[0]["method"],
+                "best_method": pool_paths[0]["method"],
                 "max_saving_kg": round(
-                    ranked[-1]["carbon_impact_kg"] - ranked[0]["carbon_impact_kg"], 4),
+                    pool_paths[-1]["carbon_impact_kg"]
+                    - pool_paths[0]["carbon_impact_kg"], 4),
                 "recommendations": ranked,
             })
-
-    country_code = country.upper() if country else None
 
     # v3.6 text layer: LLM rewrite when configured, seamless local fallback.
     provider = "local_knowledge_base"

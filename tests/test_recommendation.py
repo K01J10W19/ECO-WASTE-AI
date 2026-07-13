@@ -90,6 +90,7 @@ def test_organics_prefer_energy_capture_over_landfill():
 
 def test_ranked_payload_carries_the_full_commentary_contract():
     required = {"method", "method_display", "rank", "status_tag",
+                "is_applicable", "restriction_reason",
                 "carbon_factor_kg_per_kg", "carbon_impact_kg",
                 "encouraging_verdict", "environmental_pros", "environmental_cons"}
     for path in rs.simulate_disposal_paths("metal", 2.0):
@@ -118,6 +119,125 @@ def test_simulate_rejects_unknown_material_and_bad_weight():
     assert exc.value.status_code == 400
     with pytest.raises(ApiError):
         rs.simulate_disposal_paths("plastic", 0.0)
+
+
+# --- v3.7 national infrastructure applicability --------------------------------
+
+def test_national_profiles_only_ban_known_methods():
+    method_universe = {m for paths in rs.DISPOSAL_PATHS.values() for m in paths}
+    for country, profile in cs.NATIONAL_INFRASTRUCTURE_PROFILES.items():
+        assert len(country) == 2 and country.isupper()
+        assert profile["banned_methods"] <= method_universe, country
+        assert profile["reason"].strip(), country
+        # A profile must never be able to wipe out a whole branch.
+        for material, methods in rs.DISPOSAL_PATHS.items():
+            assert set(methods) - profile["banned_methods"], (country, material)
+
+
+def test_no_country_leaves_every_path_applicable():
+    for path in rs.simulate_disposal_paths("plastic", 1.0):
+        assert path["is_applicable"] is True
+        assert path["restriction_reason"] is None
+
+
+def test_sg_zero_landfill_reranks_among_applicable_paths():
+    ranked = rs.simulate_disposal_paths("plastic", 0.5, country="SG")
+    assert len(ranked) == 3                       # banned path stays visible
+    banned = next(p for p in ranked if p["method"] == "landfill")
+    assert banned["is_applicable"] is False
+    assert banned["rank"] is None and banned["status_tag"] is None
+    assert "Singapore" in banned["restriction_reason"]
+    assert "not an option" in banned["encouraging_verdict"]
+    assert banned["carbon_impact_kg"] == pytest.approx(0.045)   # still priced
+
+    # Ranking recomputed EXCLUSIVELY among the applicable pool: without the
+    # ban, landfill held rank 2 — now incineration inherits it.
+    applicable = [p for p in ranked if p["is_applicable"]]
+    assert [p["method"] for p in applicable] == ["recycling", "incineration"]
+    assert [p["rank"] for p in applicable] == [1, 2]
+    assert [p["status_tag"] for p in applicable] == ["Optimal", "Acceptable"]
+    # Verdict deltas draw from the applicable pool (worst = incineration).
+    assert "1.715" in applicable[0]["encouraging_verdict"]  # 1.175 - (-0.54)
+
+
+def test_de_landfill_ban_applies_and_my_stays_unrestricted():
+    de = rs.simulate_disposal_paths("paper", 1.0, country="DE")
+    assert next(p for p in de if p["method"] == "landfill")["is_applicable"] is False
+    my = rs.simulate_disposal_paths("paper", 1.0, country="my")   # normalised
+    assert all(p["is_applicable"] for p in my)
+
+
+def test_recommend_summary_and_savings_use_applicable_pool_only():
+    # Biodegradable under SG: landfill (0.90/kg, the global worst) is banned,
+    # so the worst-case baseline must pivot to composting (0.05/kg).
+    out = rs.recommend_for_items(
+        [{"material": "biodegradable", "weight_kg": 1.0}], country="SG")
+
+    item = out["items"][0]
+    assert item["best_method"] == "anaerobic_digestion"
+    assert item["max_saving_kg"] == pytest.approx(0.19)          # 0.05 - (-0.14)
+    assert out["summary"]["optimal_total_co2e_kg"] == pytest.approx(-0.14)
+    assert out["summary"]["worst_total_co2e_kg"] == pytest.approx(0.05)
+    assert out["summary"]["max_saving_kg"] == pytest.approx(0.19)
+    RecommendResponse(**out)
+
+
+def test_all_paths_banned_fails_open(monkeypatch):
+    monkeypatch.setitem(
+        cs.NATIONAL_INFRASTRUCTURE_PROFILES, "XX",
+        {"banned_methods": frozenset({"material_recovery", "incineration",
+                                      "landfill"}),
+         "reason": "test profile"})
+    ranked = rs.simulate_disposal_paths("general rubbish", 1.0, country="XX")
+    assert all(p["is_applicable"] for p in ranked)   # engine failed open
+    assert [p["rank"] for p in ranked] == [1, 2, 3]
+
+
+def test_endpoint_sg_flags_banned_path_and_validates_schema(client):
+    res = client.post("/api/recommend", json={
+        "items": [{"material": "biodegradable", "weight_kg": 1.0}],
+        "country": "SG",
+    })
+    assert res.status_code == 200
+    body = res.get_json()
+    RecommendResponse(**body)
+    paths = body["items"][0]["recommendations"]
+    assert len(paths) == 3
+    banned = next(p for p in paths if p["method"] == "landfill")
+    assert banned["is_applicable"] is False
+    assert banned["rank"] is None
+    applicable = [p for p in paths if p["is_applicable"]]
+    assert [p["rank"] for p in applicable] == [1, 2]
+    assert body["items"][0]["best_method"] == applicable[0]["method"]
+
+
+def test_llm_context_and_enrichment_exclude_banned_paths(app, monkeypatch):
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["body"] = json
+        return _llm_http_response(200, _valid_generation_from(json))
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    with app.app_context():
+        app.config["LLM_API_KEY"] = "k"
+        out = rs.recommend_for_items(
+            [{"material": "biodegradable", "weight_kg": 1.0}], country="SG")
+
+    assert out["provider"] == "llm_enriched"
+    # The LLM saw ONLY the applicable pool…
+    context = jsonlib.loads(captured["body"]["messages"][1]["content"])
+    assert [p["method"] for p in context["items"][0]["paths"]] == \
+        ["anaerobic_digestion", "composting"]
+    # …its deltas were applicable-pool relative…
+    assert context["items"][0]["paths"][0]["saving_vs_worst_kg"] == \
+        pytest.approx(0.19)
+    # …and the banned path kept its deterministic policy verdict untouched.
+    banned = next(p for p in out["items"][0]["recommendations"]
+                  if p["method"] == "landfill")
+    assert "not an option" in banned["encouraging_verdict"]
+    assert banned["encouraging_verdict"] != "Rank None — nice and simple!"
 
 
 # --- weight resolution (dual-stage UX) -----------------------------------------
@@ -426,3 +546,7 @@ def test_fallback_grid_and_verdicts_respect_the_word_budget():
         for path in rs.simulate_disposal_paths(material, 1.0):
             assert len(path["encouraging_verdict"].split()) <= 28, \
                 (material, path["method"])
+        # The restricted-path policy verdicts obey the same register.
+        for path in rs.simulate_disposal_paths(material, 1.0, country="SG"):
+            assert len(path["encouraging_verdict"].split()) <= 28, \
+                (material, path["method"], "SG")

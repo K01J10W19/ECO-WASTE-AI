@@ -1064,9 +1064,13 @@ async function refreshRecommendations() {
     data.items.forEach((rec, i) => {
       const id = state.items[i].id;
       state.recs[id] = rec;
-      const current = state.process[id];
-      if (!current || !rec.recommendations.some(p => p.method === current)) {
-        state.process[id] = rec.recommendations[0].method;   // default to rank 1
+      // Selection-pointer pivot: if the remembered method vanished OR became
+      // nationally inapplicable (e.g. "landfill" highlighted under MY, then
+      // the geo dropdown switches to zero-landfill SG), snap the pointer to
+      // the newly computed applicable Optimal — never leave it on a dead pill.
+      const current = rec.recommendations.find(p => p.method === state.process[id]);
+      if (!current || !current.is_applicable) {
+        state.process[id] = rec.best_method;   // rank-1 applicable path
       }
     });
     $("dmm-provider").textContent = "DMM · " + data.provider.replaceAll("_", " ");
@@ -1127,13 +1131,27 @@ function tabsHtml(it) {
   }
   const selected = state.process[it.id];
   const buttons = rec.recommendations.map(p => {
+    if (!p.is_applicable) {
+      // Nationally banned route: hard-disabled pill — no rank number, no
+      // Optimal/Acceptable badge, struck-through label, reason on hover.
+      return `<button type="button" disabled data-process="${p.method}" title="${esc(p.restriction_reason || "Not nationally applicable")}" class="process-tab flex-1 min-w-0 rounded-full text-[11px] font-semibold py-1.5 px-1 truncate text-zinc-300 line-through opacity-50 cursor-not-allowed">✕ ${TAB_LABEL[p.method] || p.method}</button>`;
+    }
     const cls = p.method === selected
       ? "bg-teal-100 text-teal-700" : "text-zinc-400 hover:text-zinc-600";
     return `<button data-process="${p.method}" class="process-tab flex-1 min-w-0 rounded-full text-[11px] font-semibold py-1.5 px-1 truncate transition-colors duration-200 ${cls}">${p.rank}. ${TAB_LABEL[p.method] || p.method}</button>`;
   }).join("");
-  const path = rec.recommendations.find(p => p.method === selected) || rec.recommendations[0];
+  const restricted = rec.recommendations.filter(p => !p.is_applicable);
+  const restrictedNote = restricted.length
+    ? `<p class="mt-1.5 px-1 font-mono-d text-[9px] tracking-[0.14em] uppercase text-zinc-400">✕ ${restricted.map(p => TAB_LABEL[p.method] || p.method).join(" · ")} — not nationally applicable in ${esc(countryName(state.country))}</p>`
+    : "";
+  // Panel binds to the selected path; guards guarantee it is an applicable
+  // one (the refresh pivot never leaves the pointer on a banned method).
+  const path = rec.recommendations.find(p => p.method === selected && p.is_applicable)
+    || rec.recommendations.find(p => p.is_applicable)
+    || rec.recommendations[0];
   return `
     <div class="mt-4 flex items-center w-full gap-1 rounded-full border border-zinc-200/80 bg-zinc-50 p-1">${buttons}</div>
+    ${restrictedNote}
     <div class="mt-3 rounded-xl bg-zinc-50 border border-zinc-200/80 p-4 flex flex-col gap-3 dmm-panel">
       <div class="flex items-center justify-between">
         <span class="rounded-md bg-teal-50 border border-teal-200/80 text-teal-700 font-mono-d text-[9px] tracking-[0.18em] px-2 py-1">DMM</span>

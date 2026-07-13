@@ -130,6 +130,51 @@ DISPOSAL_METHOD_FACTORS = {
 }
 
 # ---------------------------------------------------------------------------
+# NATIONAL INFRASTRUCTURE PROFILES — Module 3's applicability matrix (v3.7).
+#
+# Which end-of-life routes a country's waste system actually OPERATES for
+# household waste. Documented realities only — no speculation:
+#   SG — zero-landfill nation: municipal waste is incinerated for energy and
+#        only the ash reaches the offshore Semakau site; direct landfilling
+#        of rubbish is not an available route.
+#   DE — landfilling untreated municipal waste has been banned since 2005
+#        (TASi / Abfallablagerungsverordnung).
+# A method absent from a profile is applicable; an unknown/absent country
+# imposes NO restrictions. LOCAL + app-context-free by design — the DMM
+# reads this from worker threads and its ranking must stay offline-safe.
+# The DMM treats these bans as the supreme barrier: banned paths are
+# excluded from ranking, status tags, savings deltas and summary totals.
+# ---------------------------------------------------------------------------
+NATIONAL_INFRASTRUCTURE_PROFILES = {
+    "SG": {
+        "banned_methods": frozenset({"landfill"}),
+        "reason": "Singapore is land-scarce and burns rubbish for power "
+                  "instead of burying it",
+    },
+    "DE": {
+        "banned_methods": frozenset({"landfill"}),
+        "reason": "Germany stopped burying untreated household rubbish "
+                  "back in 2005",
+    },
+}
+
+
+def get_national_profile(country) -> dict:
+    """Infrastructure profile for an ISO alpha-2 country ({} = no limits).
+
+    Input is normalised (stripped, upper-cased); None/'' — and any country
+    without a profile — leave every disposal route applicable.
+    """
+    return NATIONAL_INFRASTRUCTURE_PROFILES.get(
+        str(country or "").strip().upper(), {})
+
+
+def is_method_applicable(method: str, country) -> bool:
+    """True unless ``country``'s national profile bans ``method``."""
+    return method not in get_national_profile(country).get("banned_methods", ())
+
+
+# ---------------------------------------------------------------------------
 # Climatiq integration (Step 5; multi-dataset material map hardened 2026-07-14).
 #
 # The estimate endpoint identifies a factor by ACTIVITY ID only — the request

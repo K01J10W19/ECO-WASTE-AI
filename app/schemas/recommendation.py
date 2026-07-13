@@ -39,8 +39,10 @@ class RecommendRequest(BaseModel):
     """Body of POST /api/recommend."""
 
     items: List[RecommendationItemRequest] = Field(min_length=1, max_length=100)
-    # ISO 3166-1 alpha-2 (e.g. the frontend's IP-geolocated default) — only
-    # flavours the v3.6 LLM text layer; the carbon numbers stay identical.
+    # ISO 3166-1 alpha-2 (e.g. the frontend's IP-geolocated default) — drives
+    # the v3.7 national-infrastructure applicability matrix (which routes
+    # exist there) and flavours the v3.6 LLM text layer; the per-path CO2e
+    # arithmetic stays identical.
     country: Optional[str] = Field(default=None, pattern=r"^[A-Za-z]{2}$")
 
     @field_validator("country", mode="before")
@@ -53,28 +55,38 @@ class RecommendRequest(BaseModel):
 
 
 class DisposalRecommendation(BaseModel):
-    """One ranked end-of-life path in the response."""
+    """One end-of-life path in the response (ranked iff nationally applicable).
+
+    v3.7 applicability: a path banned by the request country's national
+    infrastructure profile (e.g. landfill in zero-landfill Singapore) keeps
+    its priced CO2e for transparency but carries ``is_applicable=false``,
+    ``rank=null``, ``status_tag=null`` and a ``restriction_reason`` — and is
+    excluded from every ranking, saving and summary computation.
+    """
 
     method: str                           # e.g. "recycling", "composting"
     method_display: str                   # friendly UI label
-    rank: int = Field(ge=1, le=3)         # 1 = optimal ... 3 = worst baseline
-    status_tag: Literal["Optimal", "Acceptable", "Warning"]
+    rank: Optional[int] = Field(default=None, ge=1, le=3)   # None = banned path
+    status_tag: Optional[Literal["Optimal", "Acceptable", "Warning"]] = None
+    is_applicable: bool = True            # national-infrastructure verdict
+    restriction_reason: Optional[str] = None   # set iff is_applicable is false
     carbon_factor_kg_per_kg: float        # net factor; negative = credit
     carbon_impact_kg: float               # factor x weight; may be negative
-    encouraging_verdict: str              # rank-aware supportive copy
+    encouraging_verdict: str              # rank-aware copy | fixed policy copy
     environmental_pros: str               # knowledge-base rationale
     environmental_cons: str               # knowledge-base long-term costs
 
 
 class RecommendedItem(BaseModel):
-    """One simulated item with its full ranked recommendation array."""
+    """One simulated item with its full recommendation array (applicable
+    paths ranked first, banned paths flagged at the tail)."""
 
     material: str
     display_name: str
     effective_weight_kg: float = Field(gt=0.0)
     weight_source: Literal["user_weight", "box_area_proxy"]
-    best_method: str                      # the rank-1 method identifier
-    max_saving_kg: float = Field(ge=0.0)  # worst-path minus best-path CO2e
+    best_method: str                      # the rank-1 APPLICABLE method id
+    max_saving_kg: float = Field(ge=0.0)  # worst-vs-best among APPLICABLE paths
     recommendations: List[DisposalRecommendation] = Field(min_length=3, max_length=3)
 
 

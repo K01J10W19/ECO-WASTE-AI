@@ -24,11 +24,13 @@
 The project went through several pivots (custom training → single-stage YOLO-World →
 two-stage with abstract anchors → two-stage vanilla YOLOv8 → two-stage RT-DETR-X →
 COCO-80 YOLO26-seg → blended-waste segmenter → box-detector regression (v3.2) →
-v3.5 dual-stage carbon UX + DMM → **this, v3.6**: the v3.2 towers and the v3.5
-numeric engines unchanged, with the DMM's text layer upgraded to an OPTIONAL
-child-friendly, country-localized LLM generation pipeline over free
-OpenAI-compatible endpoints, deterministic local grid as the ever-present
-fallback). The paradigm is
+v3.5 dual-stage carbon UX + DMM → v3.6 child-friendly, country-localized LLM
+text layer over free OpenAI-compatible endpoints (local grid as the
+ever-present fallback) → **this, v3.7**: the v3.2 towers and the v3.5/v3.6
+engines unchanged, plus the NATIONAL INFRASTRUCTURE CAPABILITY MATRIX —
+country-aware disposal-path applicability (`is_applicable` flags,
+ranking/savings computed among applicable paths only, frontend
+selection-pointer pivot)). The paradigm is
 **edge-native and 100% local**: two frozen local models plus a classical-CV layer,
 no cloud inference. Localization and classification are **decoupled**, and each tower
 plays its architectural strength — **CNN spatial localization for WHERE, ViT global
@@ -484,10 +486,23 @@ Rules:
     `recycling | incineration | landfill`
   - organics (`biodegradable`) → `composting | anaerobic_digestion | landfill`
   - residual (`general rubbish`) → `material_recovery | incineration | landfill`
-- **Sorting engine & ranking core:** the 3 CO2e outputs are sorted **ascending**
-  (lowest footprint / deepest negative offset wins; ties fall back to method
-  name so ranking is fully deterministic): Rank 1 = Optimal green path,
-  Rank 2 = Acceptable, Rank 3 = Warning (worst-case baseline).
+- **Sorting engine & ranking core:** the applicable CO2e outputs are sorted
+  **ascending** (lowest footprint / deepest negative offset wins; ties fall
+  back to method name so ranking is fully deterministic): Rank 1 = Optimal
+  green path, Rank 2 = Acceptable, Rank 3 = Warning (worst-case baseline).
+- **National infrastructure applicability (v3.7):**
+  `carbon_service.NATIONAL_INFRASTRUCTURE_PROFILES` records which routes a
+  country actually operates (documented realities only: SG — zero-landfill
+  nation — and DE — 2005 untreated-waste ban — ban `landfill`). The request
+  `country` pre-filters the priced paths BEFORE the sorting engine:
+  rank/status_tag are computed EXCLUSIVELY among applicable paths (rank
+  1..K); banned paths stay in the payload for transparency flagged
+  `is_applicable=false` with `rank`/`status_tag` null, a
+  `restriction_reason` and a fixed ≤25-word policy verdict — and are
+  excluded from `best_method`, `max_saving_kg`, the summary totals AND the
+  LLM context (the LLM never rewrites a policy verdict). A profile that
+  would ban an entire branch fails open (all paths applicable); no country
+  → no restrictions.
 - **Local knowledge grid (v3.6 hyper-simple register):** `EXPERT_KNOWLEDGE`
   (7×3 matrix) attaches plain-language `environmental_pros` /
   `environmental_cons` to every path — 1–2 punchy sentences, ≤25 words,
@@ -561,7 +576,12 @@ Rules:
   - **DMM panel per card:** `POST /api/recommend` fills the 3 ranked
     process tabs (rank-numbered labels, Optimal/Acceptable/Warning chips,
     per-path CO2e) + the child-simple verdict and pros/cons; the section
-    header shows the text provider (`llm_enriched` / fallback).
+    header shows the text provider (`llm_enriched` / fallback). Nationally
+    banned paths (v3.7) render as hard-disabled struck-through pills — no
+    rank number, no status badge, hover reason + "not nationally
+    applicable" note — and a country switch that invalidates the
+    highlighted method auto-pivots the selection to the new applicable
+    Optimal before the panel re-renders.
   - **Telemetry:** GSAP-tweened total CO2e counter, petrol-km equivalence,
     provider label, item/mass/recyclable-share stats, ELEVATED/LOW impact
     chip; **geo badge + country select** pre-populated by an IP-geolocation
@@ -867,11 +887,16 @@ retraining), whereas CLIP's was editable text.
   NEGATIVE** — never clamp them to ≥ 0 (the ranking depends on offsets), and
   never constrain `carbon_impact_kg` / summary totals to non-negative in
   schemas or the frontend.
-- The DMM ranks by **ascending CO2e only** (method-name tie-break) — do not
-  re-order paths by any other heuristic; `status_tag` maps 1:1 from rank
-  (1 Optimal / 2 Acceptable / 3 Warning). Verdict copy is composed at runtime
-  from the sorted outcome — never hard-wire rank assumptions into
-  `EXPERT_KNOWLEDGE` text.
+- The DMM ranks by **ascending CO2e only, among nationally APPLICABLE paths**
+  (method-name tie-break; `carbon_service.NATIONAL_INFRASTRUCTURE_PROFILES`
+  is the applicability source of truth — local constants, documented bans
+  only) — do not re-order paths by any other heuristic; `status_tag` maps
+  1:1 from rank within the applicable pool (1 Optimal / 2 Acceptable /
+  3 Warning). Banned paths carry `is_applicable=false` + null rank/status
+  and must NEVER enter ranking, savings deltas, summary totals or the LLM
+  context; their policy verdict is deterministic and never LLM-rewritten.
+  Verdict copy is composed at runtime from the sorted outcome — never
+  hard-wire rank assumptions into `EXPERT_KNOWLEDGE` text.
 - Do not squish crops for the ViT — the processing layer's square padding exists to
   preserve aspect ratio (§2); never replace it with a naive resize.
 - **Never** put business logic in route handlers — services only.
