@@ -290,14 +290,45 @@ def test_llm_layer_speaks_global_average_without_country(app, monkeypatch):
     assert out["provider"] == "llm_enriched"
 
 
+def test_llm_transient_503_recovers_on_retry(app, monkeypatch):
+    # The live failure mode: Gemini free tier throws a momentary 503 "model
+    # overloaded". The layer must retry and still deliver llm_enriched.
+    monkeypatch.setattr(rs.time, "sleep", lambda _s: None)   # no real backoff
+    calls = []
+
+    def flaky_post(url, json=None, headers=None, timeout=None):
+        calls.append(1)
+        if len(calls) < 3:
+            return _llm_http_response(503)
+        return _llm_http_response(200, _valid_generation_from(json))
+
+    monkeypatch.setattr(requests, "post", flaky_post)
+
+    with app.app_context():
+        app.config["LLM_API_KEY"] = "k"
+        out = rs.recommend_for_items([{"material": "plastic", "weight_kg": 0.5}])
+
+    assert len(calls) == 3                               # 503, 503, success
+    assert out["provider"] == "llm_enriched"
+    assert out["items"][0]["recommendations"][0]["encouraging_verdict"] == \
+        "Rank 1 — nice and simple!"
+
+
 def test_llm_rate_limit_falls_back_to_local_grid(app, monkeypatch):
-    monkeypatch.setattr(requests, "post",
-                        lambda *a, **k: _llm_http_response(429))
+    monkeypatch.setattr(rs.time, "sleep", lambda _s: None)   # no real backoff
+    calls = []
+
+    def always_429(*a, **k):
+        calls.append(1)
+        return _llm_http_response(429)
+
+    monkeypatch.setattr(requests, "post", always_429)
 
     with app.app_context():
         app.config["LLM_API_KEY"] = "k"
         out = rs.recommend_for_items([{"material": "paper", "weight_kg": 1.0}])
 
+    assert len(calls) == 3                              # all attempts exhausted
     assert out["provider"] == "local_fallback"          # identity tag intact
     landfill = next(p for p in out["items"][0]["recommendations"]
                     if p["method"] == "landfill")
@@ -306,15 +337,24 @@ def test_llm_rate_limit_falls_back_to_local_grid(app, monkeypatch):
     RecommendResponse(**out)
 
 
-def test_llm_timeout_and_garbage_output_fall_back(app, monkeypatch):
-    monkeypatch.setattr(
-        requests, "post",
-        lambda *a, **k: (_ for _ in ()).throw(requests.exceptions.Timeout("slow")))
+def test_llm_timeout_is_not_retried(app, monkeypatch):
+    # A read timeout already burned the 60 s window — degrade immediately.
+    calls = []
+
+    def timeout_post(*a, **k):
+        calls.append(1)
+        raise requests.exceptions.Timeout("slow")
+
+    monkeypatch.setattr(requests, "post", timeout_post)
     with app.app_context():
         app.config["LLM_API_KEY"] = "k"
         out = rs.recommend_for_items([{"material": "metal", "weight_kg": 1.0}])
+    assert calls == [1]                                  # exactly one attempt
     assert out["provider"] == "local_fallback"
 
+
+def test_llm_garbage_output_falls_back(app, monkeypatch):
+    monkeypatch.setattr(rs.time, "sleep", lambda _s: None)   # no real backoff
     monkeypatch.setattr(requests, "post",
                         lambda *a, **k: _llm_http_response(200, "sorry, no json"))
     with app.app_context():
@@ -326,6 +366,8 @@ def test_llm_timeout_and_garbage_output_fall_back(app, monkeypatch):
 def test_partial_llm_coverage_is_rejected_atomically(app, monkeypatch):
     # The generation covers only ONE of the three paths → the whole enrichment
     # is discarded and NO field is left half-mutated.
+    monkeypatch.setattr(rs.time, "sleep", lambda _s: None)   # no real backoff
+
     def fake_post(url, json=None, headers=None, timeout=None):
         ctx = jsonlib.loads(json["messages"][1]["content"])
         first = ctx["items"][0]["paths"][0]

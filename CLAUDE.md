@@ -488,9 +488,11 @@ Rules:
   power grid) — or universal "global average" text when no country is given.
   The LLM sees the numbers READ-ONLY (strict-JSON in/out, lenient fence
   parsing); replacements are staged and applied atomically only after full
-  7×3-coverage validation. ANY failure (auth, 429 rate limit, timeout,
-  malformed output, partial coverage) logs a warning and serves the local
-  grid — `provider` labels the outcome:
+  7×3-coverage validation. Fast transient failures (429 bursts, 5xx "model
+  overloaded", network hiccups, bad output) are RETRIED up to 3 attempts
+  with short backoff (read timeouts are not — that budget is spent); only
+  after that does the layer log a warning and serve the local grid —
+  `provider` labels the outcome:
   `llm_enriched` | `local_knowledge_base` (no key) | `local_fallback`.
 - **Weight resolution (dual-stage aware):** a user-verified `weight_kg` (Stage B)
   always wins; otherwise `box_area_px / γ` (the Stage-A blind proxy — the same

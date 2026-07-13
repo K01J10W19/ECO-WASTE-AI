@@ -54,6 +54,7 @@ DESIGN GUARANTEES (CLAUDE.md):
 """
 import json
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from flask import current_app, has_app_context
@@ -275,6 +276,11 @@ EXPERT_KNOWLEDGE = {
 _LLM_TIMEOUT_S = 60
 _LLM_MAX_TOKENS = 4096
 _LLM_TEMPERATURE = 0.5
+# Free tiers throw transient 503 "model overloaded" / 429 bursts that clear
+# within seconds (observed live) — retry fast failures before falling back.
+# A read TIMEOUT is never retried: that budget is already spent.
+_LLM_MAX_ATTEMPTS = 3
+_LLM_RETRY_BACKOFF_S = (2.0, 5.0)   # sleep before attempt 2, attempt 3
 
 LLM_SYSTEM_PROMPT = """\
 You are the friendly, plain-spoken voice of a family waste-sorting app.
@@ -476,11 +482,40 @@ def _extract_json(text: str) -> dict:
 def _enrich_with_llm(results: list, country: str,
                      api_key: str, model: str, api_url: str) -> None:
     """
-    Rewrite the three literary fields of every ranked path via ONE batched
-    chat-completions call. Raises on ANY problem (HTTP status, timeout,
-    malformed JSON, missing item/path coverage, empty field) — the caller
-    catches and serves the local grid instead. Replacements are STAGED and
-    applied atomically, so a mid-validation failure never leaves the payload
+    Rewrite the three literary fields via the LLM, retrying transient blips.
+
+    Fast failures (HTTP 429/5xx "model overloaded", network hiccups,
+    malformed or partial output) are retried up to ``_LLM_MAX_ATTEMPTS``
+    times with a short backoff — free tiers throw momentary 503s that clear
+    in seconds. A read TIMEOUT is NOT retried (its 60 s budget is already
+    spent). Raises on final failure — the caller serves the local grid.
+    """
+    import requests  # local import keeps module import light for tests
+
+    last_error = None
+    for attempt in range(1, _LLM_MAX_ATTEMPTS + 1):
+        if attempt > 1:
+            time.sleep(_LLM_RETRY_BACKOFF_S[attempt - 2])
+            logger.info("LLM text layer retry %d/%d (previous attempt: %s)",
+                        attempt, _LLM_MAX_ATTEMPTS, last_error)
+        try:
+            _generate_and_apply(results, country, api_key, model, api_url)
+            return
+        except requests.exceptions.Timeout:
+            raise                    # window already burned — degrade now
+        except Exception as exc:  # noqa: BLE001 - transient upstream noise
+            last_error = exc
+    raise last_error
+
+
+def _generate_and_apply(results: list, country: str,
+                        api_key: str, model: str, api_url: str) -> None:
+    """
+    ONE batched chat-completions call + strict validation + atomic apply.
+
+    Raises on ANY problem (HTTP status, timeout, malformed JSON, missing
+    item/path coverage, empty field). Replacements are STAGED and applied
+    atomically, so a mid-validation failure never leaves the payload
     half-enriched.
     """
     import requests  # local import keeps module import light for tests
