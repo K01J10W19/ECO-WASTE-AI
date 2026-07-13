@@ -240,6 +240,66 @@ def test_climatiq_material_map_covers_taxonomy_and_derives_alias():
         assert ids and all(isinstance(a, str) and a.startswith("waste") for a in ids)
         # legacy alias = the primary candidate, always
         assert cs.MATERIAL_TO_CLIMATIQ_ACTIVITY[material] == ids[0]
+        # regional overrides: upper-case ISO alpha-2 keys, waste-prefixed ids
+        for region, reg_ids in cfg.get("regional_activity_ids", {}).items():
+            assert len(region) == 2 and region.isalpha() and region.isupper()
+            assert reg_ids and all(isinstance(a, str) and a.startswith("waste")
+                                   for a in reg_ids)
+
+
+def test_climatiq_regional_override_id_tried_first(app, monkeypatch):
+    # AU has its own DISER municipal-solid-waste factor: the region-exact
+    # override must be probed FIRST (one call, no generic-ladder walk).
+    attempts = []
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        sel = json["emission_factor"]
+        attempts.append((sel["activity_id"], sel.get("region")))
+        return _fake_response(200, {"co2e": 1.6,
+                                    "emission_factor": {"region": "AU",
+                                                        "source": "DISER",
+                                                        "year": 2025}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    with app.app_context():
+        app.config["CLIMATIQ_API_KEY"] = "test-key"
+        out = cs.calculate_impact(
+            [{"material": "general rubbish", "weight_kg": 1.0}], country="AU")
+
+    au_override = \
+        cs.CLIMATIQ_MATERIAL_MAP["general rubbish"]["regional_activity_ids"]["AU"][0]
+    assert attempts == [(au_override, "AU")]
+    assert out["items"][0]["carbon_factor_kg_per_kg"] == pytest.approx(1.6)
+
+
+def test_climatiq_global_retry_skips_regional_overrides(app, monkeypatch):
+    # When every region-scoped candidate misses, the unscoped retry must walk
+    # ONLY the generic ladder — a region-exact id can never serve "global".
+    calls = []
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        sel = json["emission_factor"]
+        calls.append((sel["activity_id"], sel.get("region")))
+        if sel.get("region"):
+            return _fake_response(400, _no_factor_body())
+        return _fake_response(200, {"co2e": 0.6})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    with app.app_context():
+        app.config["CLIMATIQ_API_KEY"] = "test-key"
+        cs.calculate_impact([{"material": "glass", "weight_kg": 1.0}],
+                            country="SG")
+
+    cfg = cs.CLIMATIQ_MATERIAL_MAP["glass"]
+    scoped = [c for c in calls if c[1] == "SG"]
+    unscoped = [c for c in calls if c[1] is None]
+    assert [a for a, _ in scoped] == \
+        list(cfg["regional_activity_ids"]["SG"]) + list(cfg["activity_ids"])
+    # The unscoped pass starts from the GENERIC primary (and stops on its
+    # first hit) — a region-exact override id never serves "global".
+    assert unscoped == [(cfg["activity_ids"][0], None)]
 
 
 def test_calculate_impact_normalizes_material_and_country(app):

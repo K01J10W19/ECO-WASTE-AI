@@ -421,17 +421,22 @@ Rules:
   material stripped/lower-cased, country stripped/upper-cased); weight
   scaling then happens locally, keeping upstream request density minimal
   (one call per unique factor, not per item). Materials map to **ORDERED
-  candidate activity ids** via `CLIMATIQ_MATERIAL_MAP` — a BEIS id
-  (GB-scoped) plus an EPA id (US-scoped) per material, all 14 verified live
-  2026-07-14; `MATERIAL_TO_CLIMATIQ_ACTIVITY` survives as the derived
-  primary-id view. The estimate selector has NO category/sector fields (those
-  are catalogue search filters) — the plural translation ("metal" →
-  "metals"/"mixed_metals") lives inside the activity id. A region miss
-  (strictly Climatiq `error_code no_emission_factors_found`) advances
-  through the candidate ids and only after ALL miss retries unscoped
-  (global); any other upstream error fails loudly with the API's own
-  message, never silently (**operator note:** confirm/adjust ids in the
-  Climatiq Data Explorer for your data plan).
+  candidate activity ids** via `CLIMATIQ_MATERIAL_MAP`: per material a
+  generic BEIS (GB) + EPA (US) ladder PLUS `regional_activity_ids` —
+  region-exact override ids from that country's own dataset (AU→DISER,
+  SG→SEFR incineration = the national route, FR→ADEME, NZ→MfE
+  gas-recovery landfill), tried FIRST for their country; all 28 (id,
+  region) pairs verified live 2026-07-14. Countries with NO weight-based
+  waste factors in ^21 (live census: MY/JP/CN/IN/DE) correctly resolve via
+  the global fallback. `MATERIAL_TO_CLIMATIQ_ACTIVITY` survives as the
+  derived primary-id view. The estimate selector has NO category/sector
+  fields (those are catalogue search filters) — the plural translation
+  ("metal" → "metals"/"mixed_metals") lives inside the activity id. A
+  region miss (strictly Climatiq `error_code no_emission_factors_found`)
+  advances through the candidate ids and only after ALL miss retries
+  unscoped (global, generic ladder only); any other upstream error fails
+  loudly with the API's own message, never silently (**operator note:**
+  confirm/adjust ids in the Climatiq Data Explorer for your data plan).
 - **v3.5 UX mechanics (split-screen grid + geolocation):**
   - *Item `id` echo:* each request item may carry the client's integer `id`
     (the /predict item id keying the canvas box ↔ editable grid row); the
@@ -828,10 +833,14 @@ retraining), whereas CLIP's was editable text.
 - γ (`PIXEL_AREA_GAMMA` = 8000) is a code constant in `carbon_service.py`, not env.
 - Climatiq estimate selectors take an **activity id only** — never add
   category/sector fields to the payload (they're search-endpoint filters, the
-  API ignores them). Regional coverage is dataset-scoped (BEIS→GB, EPA→US), so
-  `CLIMATIQ_MATERIAL_MAP` holds ordered candidate ids per material; the
-  global fallback may fire ONLY on `error_code no_emission_factors_found` —
-  auth/quota/malformed-selector errors must stay loud 502s.
+  API ignores them). Regional coverage is dataset-scoped (BEIS→GB, EPA→US,
+  DISER→AU, SEFR→SG, ADEME→FR, MfE→NZ; nothing weight-based for MY/JP/CN/
+  IN/DE), so `CLIMATIQ_MATERIAL_MAP` holds ordered candidate ids per material
+  plus `regional_activity_ids` overrides tried first for their exact country;
+  the global fallback may fire ONLY on `error_code no_emission_factors_found`
+  — auth/quota/malformed-selector errors must stay loud 502s. Only wire an
+  override whose waste type honestly matches the material (no mixed-stream
+  proxies for specific materials).
 - The audit endpoint's item `id` is the CLIENT's grid row key: echo it back
   verbatim (null when absent), never renumber, filter or reorder items
   server-side — item order in == item order out. Weight substitution goes

@@ -135,18 +135,25 @@ DISPOSAL_METHOD_FACTORS = {
 # The estimate endpoint identifies a factor by ACTIVITY ID only — the request
 # has NO category/sector fields (those are catalogue *search* filters), so the
 # material-name translation ("metal" → "metals" / "mixed_metals") lives INSIDE
-# the id string. Regional coverage differs per SOURCE DATASET: BEIS publishes
-# GB-scoped waste factors, the US EPA publishes US-scoped ones, under
-# different ids. Each material therefore maps to an ORDERED tuple of official
-# candidate ids: the fetch tries every candidate with the requested region and
-# only falls back to the region-unscoped (global) factor when ALL mapped ids
-# genuinely lack that region (Climatiq error_code "no_emission_factors_found");
-# any other upstream error fails loudly.
+# the id string. Regional coverage differs per SOURCE DATASET, each publishing
+# its own ids for its own region (live census of ^21, sector=Waste,
+# unit_type=Weight): BEIS→GB, EPA→US, DISER→AU, SEFR→SG, ADEME→FR, MfE→NZ —
+# and NOTHING weight-based exists for e.g. MY/JP/CN/IN/DE, where the global
+# fallback is genuinely correct.
 #
-# All 14 ids verified LIVE against data_version ^21 on 2026-07-14 with a real
-# key: the BEIS ids resolve region GB, the EPA ids resolve region US.
-# NOTE for the operator: confirm/adjust ids in the Climatiq Data Explorer
-# (https://www.climatiq.io/data) for your data plan.
+# Resolution order per material:
+#   1. ``regional_activity_ids[country]`` — region-exact override ids from
+#      that country's own dataset (only wired where the waste type honestly
+#      matches our material; SG's route is incineration because Singapore
+#      incinerates practically all waste, NZ's landfills recover gas).
+#   2. ``activity_ids`` — the generic BEIS/EPA ladder, region-scoped.
+#   3. Only when EVERY candidate genuinely lacks the region (Climatiq
+#      error_code "no_emission_factors_found") → the region-unscoped global
+#      retry; any other upstream error fails loudly.
+#
+# All 28 (id, region) pairs verified LIVE against data_version ^21 on
+# 2026-07-14 with a real key. NOTE for the operator: confirm/adjust ids in
+# the Climatiq Data Explorer (https://www.climatiq.io/data) for your plan.
 # ---------------------------------------------------------------------------
 CLIMATIQ_ESTIMATE_URL = "https://api.climatiq.io/data/v1/estimate"
 # Governs the served dataset year — deliberately UNPINNED (a "^" range) so
@@ -159,34 +166,78 @@ CLIMATIQ_TIMEOUT_S = 10
 _CLIMATIQ_NO_FACTOR_CODE = "no_emission_factors_found"
 
 CLIMATIQ_MATERIAL_MAP = {
-    "biodegradable": {"activity_ids": (
-        "waste-type_organic_food_and_drink-disposal_method_landfill",   # BEIS (GB)
-        "waste-type_food_waste-disposal_method_landfilled",             # EPA  (US)
-    )},
-    "cardboard": {"activity_ids": (
-        "waste-type_cardboard-disposal_method_landfill",                # BEIS (GB)
-        "waste-type_corrugated_containers-disposal_method_landfilled",  # EPA  (US)
-    )},
-    "glass": {"activity_ids": (
-        "waste-type_glass-disposal_method_landfill",                    # BEIS (GB)
-        "waste-type_glass-disposal_method_landfilled",                  # EPA  (US)
-    )},
-    "metal": {"activity_ids": (
-        "waste-type_metals-disposal_method_landfill",                   # BEIS (GB)
-        "waste-type_mixed_metals-disposal_method_landfilled",           # EPA  (US)
-    )},
-    "paper": {"activity_ids": (
-        "waste-type_paper-disposal_method_landfill",                    # BEIS (GB)
-        "waste-type_mixed_paper_general-disposal_method_landfilled",    # EPA  (US)
-    )},
-    "plastic": {"activity_ids": (
-        "waste-type_plastics-disposal_method_landfill",                 # BEIS (GB)
-        "waste-type_mixed_plastics-disposal_method_landfilled",         # EPA  (US)
-    )},
-    "general rubbish": {"activity_ids": (
-        "waste-type_household_residual_waste-disposal_method_landfill", # BEIS (GB)
-        "waste-type_mixed_msw-disposal_method_landfilled",              # EPA  (US)
-    )},
+    "biodegradable": {
+        "activity_ids": (
+            "waste-type_organic_food_and_drink-disposal_method_landfill",   # BEIS (GB)
+            "waste-type_food_waste-disposal_method_landfilled",             # EPA  (US)
+        ),
+        "regional_activity_ids": {
+            "AU": ("waste-type_food-disposal_method_landfill",),                    # DISER
+            "SG": ("waste-type_food_waste-disposal_method_incineration",),          # SEFR
+            "FR": ("waste-type_putrescible_waste-disposal_method_landfill",),       # ADEME
+            "NZ": ("waste-type_food-disposal_method_landfill_with_gas_recovery",),  # MfE
+        },
+    },
+    "cardboard": {
+        "activity_ids": (
+            "waste-type_cardboard-disposal_method_landfill",                # BEIS (GB)
+            "waste-type_corrugated_containers-disposal_method_landfilled",  # EPA  (US)
+        ),
+        "regional_activity_ids": {
+            "FR": ("waste-type_packaging_cardboard-disposal_method_landfill",),     # ADEME
+        },
+    },
+    "glass": {
+        "activity_ids": (
+            "waste-type_glass-disposal_method_landfill",                    # BEIS (GB)
+            "waste-type_glass-disposal_method_landfilled",                  # EPA  (US)
+        ),
+        "regional_activity_ids": {
+            "SG": ("waste-type_glass_waste-disposal_method_incineration",),         # SEFR
+            "FR": ("waste-type_packaging_glass-disposal_method_landfill",),         # ADEME
+        },
+    },
+    "metal": {
+        "activity_ids": (
+            "waste-type_metals-disposal_method_landfill",                   # BEIS (GB)
+            "waste-type_mixed_metals-disposal_method_landfilled",           # EPA  (US)
+        ),
+        "regional_activity_ids": {
+            "SG": ("waste-type_metal_waste-disposal_method_incineration",),         # SEFR
+            "FR": ("waste-type_packaging_aluminium-disposal_method_landfill",),     # ADEME
+        },
+    },
+    "paper": {
+        "activity_ids": (
+            "waste-type_paper-disposal_method_landfill",                    # BEIS (GB)
+            "waste-type_mixed_paper_general-disposal_method_landfilled",    # EPA  (US)
+        ),
+        "regional_activity_ids": {
+            "NZ": ("waste-type_paper-disposal_method_landfill_with_gas_recovery",), # MfE
+        },
+    },
+    "plastic": {
+        "activity_ids": (
+            "waste-type_plastics-disposal_method_landfill",                 # BEIS (GB)
+            "waste-type_mixed_plastics-disposal_method_landfilled",         # EPA  (US)
+        ),
+        "regional_activity_ids": {
+            "FR": ("waste-type_packaging_other_plastics_and_complex_plastics"
+                   "-disposal_method_landfill",),                                   # ADEME
+        },
+    },
+    "general rubbish": {
+        "activity_ids": (
+            "waste-type_household_residual_waste-disposal_method_landfill", # BEIS (GB)
+            "waste-type_mixed_msw-disposal_method_landfilled",              # EPA  (US)
+        ),
+        "regional_activity_ids": {
+            "AU": ("waste-type_municipal_solid_waste-disposal_method_landfill",),   # DISER
+            "FR": ("waste-type_residual_household_waste-disposal_method_landfill",),# ADEME
+            "NZ": ("waste-type_general_waste-disposal_method_landfill"
+                   "_with_gas_recovery",),                                          # MfE
+        },
+    },
 }
 
 # Legacy single-id view (the PRIMARY candidate per material) — derived, kept
@@ -215,9 +266,10 @@ def _fetch_climatiq_factor(material: str, country: str, api_key: str) -> float:
     and MUST arrive normalised (stripped, upper-cased — ``_resolve_factor``
     guarantees this before the cache key is formed).
 
-    Resolution ladder (per the multi-dataset map): every candidate activity id
-    for the material is tried WITH the requested region; a candidate only
-    advances the ladder on Climatiq's genuine coverage miss
+    Resolution ladder (per the multi-dataset map): the country's region-exact
+    override ids (``regional_activity_ids``) are tried FIRST, then the generic
+    BEIS/EPA ladder — every candidate WITH the requested region; a candidate
+    only advances the ladder on Climatiq's genuine coverage miss
     (``no_emission_factors_found``). When all mapped ids lack the region, the
     fetch falls back to the region-unscoped (global) factor. Any OTHER
     upstream problem (auth, quota, malformed selector, timeout, network)
@@ -225,7 +277,11 @@ def _fetch_climatiq_factor(material: str, country: str, api_key: str) -> float:
     """
     import requests  # local import keeps module import light for tests
 
-    candidates = CLIMATIQ_MATERIAL_MAP[material]["activity_ids"]
+    cfg = CLIMATIQ_MATERIAL_MAP[material]
+    # country == "" (the global retry) has no override key by construction,
+    # so the unscoped pass walks only the generic ladder.
+    candidates = (tuple(cfg.get("regional_activity_ids", {}).get(country, ()))
+                  + cfg["activity_ids"])
     last_detail = ""
     for activity_id in candidates:
         selector = {
