@@ -268,7 +268,11 @@ EXPERT_KNOWLEDGE = {
 # The LLM may ONLY write the three literary fields; every number, rank and
 # method id is computed locally and passed in read-only.
 # ---------------------------------------------------------------------------
-_LLM_TIMEOUT_S = 30
+# Free-tier "thinking" models (e.g. gemini-flash-latest) can spend a long
+# while reasoning before emitting the JSON — 30 s produced spurious timeouts
+# in live testing, so the window is generous; any overrun still degrades
+# cleanly to the local grid.
+_LLM_TIMEOUT_S = 60
 _LLM_MAX_TOKENS = 4096
 _LLM_TEMPERATURE = 0.5
 
