@@ -115,12 +115,21 @@ tight same-class clusters preserved
 - **Known limitation (document honestly in the report):** the specialist checkpoint
   has no published metrics (community model, ~4.1k training images) — recall on
   unusual items may trail bigger baselines, and a box area *includes background*
-  so it is a coarser size proxy than a mask. Mitigations: the low Stage-1
-  threshold; γ recalibrated for rectangular over-coverage; and both prior locators
-  stay one env-var away (`models/yolov8m-seg-trash.pt` masks,
-  `yolo26x-seg.pt` COCO-80) for A/B comparison (report material). ψ's calibration
-  constants are heuristics — the payload carries every physics reading +
-  `tiebreak_applied` so corrections are fully auditable.
+  so it is a coarser size proxy than a mask. VERIFIED LIVE (2026-07-14,
+  three-bottle catalog image): tightly clustered IDENTICAL items can merge into
+  ONE group box — the nano detector proposes NO per-bottle candidates above 1%
+  conf, so this is a model-capacity limit, NOT an NMS artifact (agnostic
+  True/False outputs are byte-identical on the scene; no iou/conf setting can
+  split a box the model never drew). The A/B locators DO split it:
+  `yolov8m-seg-trash.pt` 3/3 bottles (conf 0.33–0.63, some pair-box noise),
+  `yolo26x-seg.pt` 3/3 cleanly (conf 0.87–0.91, plus low-conf COCO background
+  fires — the documented trade-off). Mitigations: the low Stage-1 threshold; γ
+  recalibrated for rectangular over-coverage; and both prior locators stay one
+  env-var away (`MODEL_PATH=models/yolov8m-seg-trash.pt` masks,
+  `MODEL_PATH=yolo26x-seg.pt` COCO-80) for A/B comparison and cluster-heavy
+  scenes (report material). ψ's calibration constants are heuristics — the
+  payload carries every physics reading + `tiebreak_applied` so corrections
+  are fully auditable.
 
 **Method B — Plasticity Index & tie-break rule (formulas):**
 
