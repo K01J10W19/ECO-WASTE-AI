@@ -610,8 +610,10 @@
         <div id="camera-overlay" class="hidden absolute inset-0 z-30 flex-col items-center justify-center gap-4 bg-zinc-900/80 backdrop-blur-sm">
           <video id="camera-video" autoplay playsinline muted class="max-w-[80%] max-h-[70%] rounded-xl border border-zinc-700 shadow-lg"></video>
           <div class="flex items-center gap-3">
-            <button id="capture-btn" class="rounded-full bg-teal-500 hover:bg-teal-400 text-white text-xs font-semibold px-5 py-2.5 transition-colors duration-200">Capture</button>
-            <button id="cancel-camera-btn" class="rounded-full bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs font-semibold px-5 py-2.5 transition-colors duration-200">Cancel</button>
+            <button id="capture-btn" aria-label="Capture photo" title="Capture" class="rounded-full bg-teal-500 hover:bg-teal-600 text-white px-5 py-2.5 flex items-center justify-center shadow-lg shadow-teal-500/25 transform transition-all duration-200 active:scale-95">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" class="shrink-0"><path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2l1-1.5h7L16.5 7h2A1.5 1.5 0 0 1 20 8.5v9A1.5 1.5 0 0 1 18.5 19h-13A1.5 1.5 0 0 1 4 17.5v-9Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"></path><circle cx="12" cy="13" r="3" stroke="currentColor" stroke-width="1.8"></circle></svg>
+            </button>
+            <button id="cancel-camera-btn" class="rounded-full bg-neutral-800/40 text-neutral-300 border border-neutral-700/50 backdrop-blur-md hover:bg-neutral-700/60 text-xs font-medium px-5 py-2.5 transform transition-all duration-200 active:scale-95">Cancel</button>
           </div>
         </div>
       </div>
@@ -649,8 +651,12 @@
           </div>
         </article>
 
-        <!-- MODULE B · Emission factor profile -->
-        <article class="rounded-2xl border border-zinc-300 bg-zinc-100 p-6 shadow-sm shadow-zinc-900/[0.04] gsap-card">
+        <!-- MODULE B · Emission factor profile.
+             relative z-[60]: the gsap-card will-change rule makes every card
+             its own stacking context, and sibling contexts paint in DOM
+             order — without this elevation the item cards BELOW would paint
+             over the open country dropdown regardless of the menu's z-index. -->
+        <article class="relative z-[60] rounded-2xl border border-zinc-300 bg-zinc-100 p-6 shadow-sm shadow-zinc-900/[0.04] gsap-card">
           <div class="flex flex-col md:flex-col lg:flex-row lg:items-center justify-between gap-3 lg:gap-4">
             <div class="flex-1 min-w-0">
               <p class="text-sm font-semibold text-zinc-900">Emission factor profile</p>
@@ -667,7 +673,7 @@
                 <svg id="country-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" class="shrink-0 text-zinc-400 transition-transform duration-200"><path d="m6 9 6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
               </button>
               <div id="country-menu" role="listbox" aria-label="Emission factor region"
-                class="hidden absolute z-50 mt-2 w-full min-w-[200px] rounded-xl border border-zinc-200/80 bg-white py-1.5 shadow-xl shadow-zinc-900/10 max-h-64 overflow-y-auto origin-top transition duration-150 ease-out opacity-0 scale-95"></div>
+                class="hidden absolute z-[100] mt-2 w-full min-w-[200px] rounded-xl border border-zinc-200/80 bg-white py-1.5 shadow-xl shadow-zinc-900/10 max-h-64 overflow-y-auto origin-top transition duration-150 ease-out opacity-0 scale-95"></div>
             </div>
           </div>
         </article>
@@ -735,10 +741,12 @@ const COUNTRIES = [
   { code: "AU", name: "Australia",      grid: 0.531 },
   { code: "NZ", name: "New Zealand",    grid: 0.112 },
 ];
+// Status badge presets — kept in exact colour lockstep with the rank-based
+// active tab classes (1 emerald / 2 amber / 3 rose) and the number chips.
 const STATUS_CLS = {
-  "Optimal":    "bg-emerald-50 text-emerald-600",
-  "Acceptable": "bg-zinc-100 text-zinc-600",
-  "Warning":    "bg-amber-50 text-amber-600",
+  "Optimal":    "bg-emerald-50 text-emerald-800 border border-emerald-200",
+  "Acceptable": "bg-amber-50 text-amber-800 border border-amber-200",
+  "Warning":    "bg-rose-50 text-rose-800 border border-rose-200",
 };
 const TAB_LABEL = {
   recycling: "Recycling", incineration: "Incineration", landfill: "Landfill",
@@ -1215,12 +1223,20 @@ const ACTIVE_TAB_CLS = {
 };
 
 // Golden key-data chips: wrap carbon figures ("3.5712 kg") in a highlight
-// span. Runs AFTER esc(), so LLM/local text can never inject markup — the
-// regex only wraps already-escaped digit runs. Applies uniformly to live
-// LLM responses and the local knowledge-grid fallback copy.
-function highlightNums(text) {
+// span, TONED to the active path's rank so the whole panel block speaks one
+// colour (rank 2 amber, rank 3 rose, else the resting teal). Runs AFTER
+// esc(), so LLM/local text can never inject markup — the regex only wraps
+// already-escaped digit runs. Applies uniformly to live LLM responses and
+// the local knowledge-grid fallback copy.
+const NUM_CHIP_CLS = {
+  2: "font-bold text-amber-700 bg-amber-50 px-1 py-0.5 rounded border border-amber-100 mx-0.5",
+  3: "font-bold text-rose-700 bg-rose-50 px-1 py-0.5 rounded border border-rose-100 mx-0.5",
+};
+function highlightNums(text, rank) {
+  const cls = NUM_CHIP_CLS[rank]
+    || "font-bold text-teal-700 bg-teal-50/80 px-1 py-0.5 rounded border border-teal-100 mx-0.5";
   return esc(text).replace(/(\d+(?:\.\d+)?\s?kg)\b/gi,
-    '<span class="font-bold text-teal-700 bg-teal-50/80 px-1 py-0.5 rounded border border-teal-100 mx-0.5">$1</span>');
+    `<span class="${cls}">$1</span>`);
 }
 
 function tabsHtml(it) {
@@ -1259,15 +1275,15 @@ function tabsHtml(it) {
         <span class="rounded-md bg-teal-50 border border-teal-200/80 text-teal-700 font-mono-d text-[9px] tracking-[0.18em] px-2 py-1">DMM</span>
         <span class="rounded-full px-2.5 py-1 text-[10px] font-semibold ${STATUS_CLS[path.status_tag] || STATUS_CLS.Acceptable}">Rank #${path.rank} · ${esc(path.status_tag)} · ${path.carbon_impact_kg.toFixed(3)} kg</span>
       </div>
-      <p class="text-xs leading-relaxed text-slate-700">${highlightNums(path.encouraging_verdict)}</p>
+      <p class="text-xs leading-relaxed text-slate-700">${highlightNums(path.encouraging_verdict, path.rank)}</p>
       <div class="pl-2 flex flex-col gap-1.5">
         <div class="flex items-start gap-2">
           <span class="shrink-0 mt-0.5 w-3.5 h-3.5 rounded-full bg-emerald-50 border border-emerald-200/80 text-emerald-600 text-[9px] font-bold flex items-center justify-center leading-none">+</span>
-          <p class="text-[11px] leading-relaxed text-slate-600"><span class="font-semibold text-emerald-700">Pros:</span> ${highlightNums(path.environmental_pros)}</p>
+          <p class="text-[11px] leading-relaxed text-slate-600"><span class="font-semibold text-emerald-700">Pros:</span> ${highlightNums(path.environmental_pros, path.rank)}</p>
         </div>
         <div class="flex items-start gap-2">
           <span class="shrink-0 mt-0.5 w-3.5 h-3.5 rounded-full bg-rose-50 border border-rose-200/80 text-rose-600 text-[9px] font-bold flex items-center justify-center leading-none">–</span>
-          <p class="text-[11px] leading-relaxed text-slate-600"><span class="font-semibold text-rose-700">Cons:</span> ${highlightNums(path.environmental_cons)}</p>
+          <p class="text-[11px] leading-relaxed text-slate-600"><span class="font-semibold text-rose-700">Cons:</span> ${highlightNums(path.environmental_cons, path.rank)}</p>
         </div>
       </div>
     </div>`;
