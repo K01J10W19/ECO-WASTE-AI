@@ -8,8 +8,8 @@ Method B physics extractor) runs for real on tiny generated images. We verify
 the detect → pad → classify → tie-break → carbon composition, the
 box-area payload, the box-area dynamic carbon formula (gamma = 8000), the psi
 plastic-vs-glass tie-breaker, box clamping, the Stage-1 conf override, the
-class-agnostic NMS predict contract (duplicate-box guard), and that an empty
-result is valid.
+Stage-1 suppression contract (per-class NMS, relaxed IoU — owner-locked),
+and that an empty result is valid.
 """
 import types
 
@@ -151,11 +151,13 @@ def test_conf_override_surfaces_more_detections(app, monkeypatch, tmp_path):
     assert len(lowered_out["items"]) == 2     # override lets it through
 
 
-def test_predict_runs_class_agnostic_suppression(app, monkeypatch, tmp_path):
-    """Duplicate-box guard: Ultralytics NMS is per-class by default, so one
-    object firing as both "Paper" and "Waste" survives suppression twice and
-    the ViT then names both crops identically. The predict call must request
-    class-agnostic suppression — exactly one box per physical object."""
+def test_predict_runs_the_locked_suppression_contract(app, monkeypatch, tmp_path):
+    """Pins the owner-locked Stage-1 suppression: PER-CLASS NMS
+    (agnostic_nms=False) at the relaxed 0.60 IoU. Context preserved:
+    agnostic mode was trialled against duplicate cross-class frames and
+    reverted by owner preference; identical-item cluster merging proved to
+    be a model-capacity limit unaffected by either flag (see the constants
+    block in detection_service)."""
     captured = {}
     result = types.SimpleNamespace(orig_shape=(720, 1280), boxes=[])
 
@@ -171,10 +173,7 @@ def test_predict_runs_class_agnostic_suppression(app, monkeypatch, tmp_path):
         expected_conf = float(app.config["CONFIDENCE_THRESHOLD"])
         ds.analyze_waste_pipeline(_real_image(tmp_path))
 
-    assert captured["agnostic_nms"] is True
-    # 0.60 (raised from 0.45): merge only above 60% IoU so tightly packed
-    # same-class clusters keep their individual boxes; a genuine double-fire
-    # on one object (IoU >= ~0.8) still collapses.
+    assert captured["agnostic_nms"] is ds._NMS_AGNOSTIC is False
     assert captured["iou"] == ds._NMS_IOU == 0.60
     assert captured["conf"] == expected_conf
 

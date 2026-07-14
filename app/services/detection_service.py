@@ -56,23 +56,24 @@ _PAD_FILL = (114, 114, 114)
 # Processing layer: the ViT's native input resolution.
 _PATCH_SIZE = 224
 
-# Stage-1 suppression — tuned against the TWO observed failure modes:
-#   * DUPLICATE FRAMES (fixed by agnostic_nms=True): Ultralytics NMS is
-#     per-class by default, so one physical object firing under TWO coarse
-#     labels (e.g. "Paper" AND "Waste") survived suppression twice and
-#     Stage 2 named both crops identically. Agnostic NMS merges candidates
-#     ACROSS classes — one box per physical object. NOTE: same-class boxes
-#     are compared identically in per-class and agnostic modes, so this
-#     flag is orthogonal to the cluster case below — flipping it back to
-#     per-class would NOT free clusters, only resurrect the duplicates.
-#   * CLUSTER MERGING (fixed by this IoU threshold): tightly packed
-#     homogeneous items (three glass bottles shoulder to shoulder) merged
-#     into one macro box at iou=0.45 — adjacent distinct items can
-#     legitimately overlap ~50%. Raised to 0.60 (2026-07-14): boxes merge
-#     only above 60% IoU, so clustered sub-objects survive, while a true
-#     double-fire on ONE object (IoU typically >= 0.8) still collapses.
+# Stage-1 suppression — the owner-locked configuration (2026-07-14):
+# PER-CLASS NMS (agnostic_nms=False, the Ultralytics default behaviour) at a
+# relaxed 0.60 IoU. Investigation notes preserved for the report:
+#   * CLUSTER MERGING of identical items (three bottles → one group box) is
+#     a MODEL-CAPACITY limit of the nano detector, not a suppression
+#     artifact: the raw candidate pool held NO per-bottle boxes above 1%
+#     conf, and agnostic True/False outputs were byte-identical on the
+#     probe scene (same-class boxes are compared identically in both
+#     modes). Only the A/B locators (yolov8m-seg-trash, yolo26x-seg) split
+#     such scenes — the owner prefers keeping the object detector.
+#   * ACCEPTED TRADE-OFF of per-class mode: one physical object firing
+#     under TWO coarse labels (e.g. "Paper" + "Waste", IoU >= ~0.8) can
+#     survive suppression twice and reach Stage 2 as duplicate frames
+#     (observed 2026-07-14 am). If that re-bites, the remedies are
+#     agnostic_nms=True or a payload-level overlap dedupe.
 # The NMS-free A/B baselines (YOLO26, RT-DETR) accept and ignore both args.
 _NMS_IOU = 0.60
+_NMS_AGNOSTIC = False
 
 # ---------------------------------------------------------------------------
 # Method B calibration constants (Plasticity Index psi).
@@ -189,16 +190,16 @@ def _locate_objects(image_path: str, conf_threshold: float) -> tuple:
     ``located_as`` is the detector's own coarse label — kept purely for
     auditing; the pipeline never branches on it. ``box_area_px`` is the
     geometric box area (x2-x1)*(y2-y1) of the CLAMPED box — the volume/mass
-    proxy for carbon scaling. The predict call runs CLASS-AGNOSTIC suppression
-    (``agnostic_nms=True``, ``iou=_NMS_IOU``) so overlapping fires under
-    different coarse labels collapse to one box per physical object.
+    proxy for carbon scaling. The predict call runs the owner-locked
+    suppression configuration (``agnostic_nms=_NMS_AGNOSTIC``,
+    ``iou=_NMS_IOU`` — see the constants block for the trade-off notes).
     """
     model = get_model()
     device = str(current_app.config.get("INFERENCE_DEVICE", "cpu"))
 
     try:
         results = model.predict(source=image_path, conf=conf_threshold,
-                                iou=_NMS_IOU, agnostic_nms=True,
+                                iou=_NMS_IOU, agnostic_nms=_NMS_AGNOSTIC,
                                 device=device, verbose=False)
     except Exception as exc:  # noqa: BLE001 - any inference failure is client-facing
         raise ApiError("Object localization failed.", status_code=500) from exc
