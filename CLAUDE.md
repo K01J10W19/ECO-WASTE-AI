@@ -556,8 +556,13 @@ Rules:
   parsing); replacements are staged and applied atomically only after full
   7×3-coverage validation. Fast transient failures (429 bursts, 5xx "model
   overloaded", network hiccups, bad output) are RETRIED up to 3 attempts
-  with short backoff (read timeouts are not — that budget is spent); only
-  after that does the layer log a warning and serve the local grid —
+  with short backoff (read timeouts are not — that budget is spent). 429s
+  are paced precisely: the endpoint's `Retry-After` header replaces the
+  default backoff (capped 8 s); a longer hint — or a fully exhausted retry
+  ladder — opens the **COOLDOWN BREAKER** (`_llm_cooldown_until`, ≥45 s):
+  every request inside the window serves the local grid instantly with
+  ZERO outbound LLM flights, so an exhausted quota is never hammered. Only
+  after all that does the layer log a warning and serve the local grid —
   `provider` labels the outcome:
   `llm_enriched` | `local_knowledge_base` (no key) | `local_fallback`.
 - **Weight resolution (dual-stage aware):** a user-verified `weight_kg` (Stage B)
@@ -566,7 +571,9 @@ Rules:
   `carbon_service.resolve_effective_weight` helper that
   `/api/calculate-impact` also runs. At least one is required; the payload
   labels `weight_source` (`user_weight` | `box_area_proxy`).
-- **Endpoint:** `POST /api/recommend` — body
+- **Endpoint:** `POST /api/recommend` — **the BATCH endpoint by design**:
+  the SPA aggregates ALL detected items into this ONE request, and the text
+  layer makes at most ONE LLM flight per request (never per item) — body
   `{items:[{material, weight_kg?, box_area_px?}], country?}` validated by
   `schemas/recommendation.RecommendRequest` (≤100 items, weight (0, 1000] kg,
   area ≤ 1000·γ, blank country → None/global); returns per-item ranked
@@ -617,7 +624,12 @@ Rules:
     lookup (ipapi.co, 4 s timeout, silent MY fallback) — manual changes flip
     AUTO-GEO → OVERRIDE and re-run audit + recommendations.
   - **Resilience:** every fetch failure lands in a GSAP toast + status pill;
-    the numbers degrade to the Stage-A proxy, never a blank screen.
+    the numbers degrade to the Stage-A proxy, never a blank screen. The
+    audit + recommendation refreshers are **SINGLE-FLIGHT** (AbortController
+    dedup): a new trigger supersedes the in-flight call, so rapid country
+    flips or weight edits can never stack concurrent `/api/recommend`
+    flights (= concurrent LLM calls) or hydrate a stale response over a
+    fresher one.
 - **`templates/carbon_lab.html` (`/carbon-lab`):** retained dependency-free
   API tester for Modules 2+3 (request/response JSON panels).
 
@@ -906,8 +918,12 @@ retraining), whereas CLIP's was editable text.
   (`GRID_INTENSITY_FALLBACK` → 0.207 anchor); recommendations must never
   502 or block because of it; (2) the v3.6 LLM layer — it may ONLY rewrite
   the three text fields (never ranks, methods, numbers or item order), runs
-  once per request, and EVERY failure mode must degrade to the local grid
-  with `provider: "local_fallback"`. Never move either into the workers.
+  once per request (ONE batched flight for ALL items — `/api/recommend` IS
+  the batch endpoint; never add per-item LLM calls), honours `Retry-After`
+  on 429 and keeps the module-level time-based cooldown breaker
+  (`_llm_cooldown_until`) — never remove it or re-hammer an exhausted
+  quota — and EVERY failure mode must degrade to the local grid with
+  `provider: "local_fallback"`. Never move either into the workers.
 - The LLM endpoint is **OpenAI-compatible chat-completions via `requests`**
   (`LLM_API_URL`/`LLM_MODEL`/`LLM_API_KEY`) — do not add provider SDKs, and
   keep `TestingConfig.LLM_API_KEY = ""` so tests stay hermetic (LLM tests

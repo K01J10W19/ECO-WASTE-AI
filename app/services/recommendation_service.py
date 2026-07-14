@@ -289,6 +289,39 @@ _LLM_RETRY_BACKOFF_S = (2.0, 5.0)   # sleep before attempt 2, attempt 3
 # ("Great, rank 1!") — fields shorter than this many words are rejected,
 # which triggers a retry and, if persistent, the local grid.
 _LLM_MIN_FIELD_WORDS = 5
+# -- 429 rate-limit sealing -------------------------------------------------
+# The endpoint's Retry-After header is honoured when retrying, capped here:
+# a header ABOVE the cap means the quota window is minutes away — retrying
+# inside this request is doomed, so the layer degrades immediately instead.
+_LLM_RETRY_AFTER_CAP_S = 8.0
+# After a rate-limit failure the COOLDOWN BREAKER opens: every request inside
+# the window serves the local grid instantly with ZERO outbound LLM flights
+# (no retry stacking against an exhausted quota). Time-based, self-resetting.
+_LLM_COOLDOWN_S = 45.0
+_llm_cooldown_until = 0.0   # time.monotonic() deadline; module-level state
+
+
+class _LlmHttpError(RuntimeError):
+    """Non-200 from the LLM endpoint, carrying its rate-limit hints."""
+
+    def __init__(self, status_code: int, retry_after: float = None):
+        super().__init__(f"LLM endpoint returned HTTP {status_code}")
+        self.status_code = status_code
+        self.retry_after = retry_after
+
+
+def _open_llm_cooldown(retry_after: float = None) -> None:
+    """Open the breaker for max(server hint, default) seconds."""
+    global _llm_cooldown_until
+    window = max(float(retry_after or 0.0), _LLM_COOLDOWN_S)
+    _llm_cooldown_until = time.monotonic() + window
+    logger.warning("LLM rate limit hit — cooling the text layer down for "
+                   "%.0f s (the local grid serves meanwhile).", window)
+
+
+def _llm_cooling_down() -> bool:
+    """True while the rate-limit breaker is open (skip the network)."""
+    return time.monotonic() < _llm_cooldown_until
 
 LLM_SYSTEM_PROMPT = """\
 You are the friendly, plain-spoken voice of a family waste-sorting app.
@@ -593,16 +626,25 @@ def _enrich_with_llm(results: list, country: str,
 
     Fast failures (HTTP 429/5xx "model overloaded", network hiccups,
     malformed or partial output) are retried up to ``_LLM_MAX_ATTEMPTS``
-    times with a short backoff — free tiers throw momentary 503s that clear
-    in seconds. A read TIMEOUT is NOT retried (its 60 s budget is already
-    spent). Raises on final failure — the caller serves the local grid.
+    times — free tiers throw momentary 503s that clear in seconds. Rate
+    limiting is handled precisely: a ``Retry-After`` header replaces the
+    default backoff (capped at ``_LLM_RETRY_AFTER_CAP_S``); a header ABOVE
+    the cap means the quota window is far away, so the layer opens the
+    cooldown breaker and degrades immediately instead of burning doomed
+    retries. Exhausting all attempts on 429 also opens the breaker. A read
+    TIMEOUT is NOT retried (its 60 s budget is already spent). Raises on
+    final failure — the caller serves the local grid.
     """
     import requests  # local import keeps module import light for tests
 
     last_error = None
     for attempt in range(1, _LLM_MAX_ATTEMPTS + 1):
         if attempt > 1:
-            time.sleep(_LLM_RETRY_BACKOFF_S[attempt - 2])
+            delay = _LLM_RETRY_BACKOFF_S[attempt - 2]
+            if isinstance(last_error, _LlmHttpError) and last_error.retry_after:
+                # The endpoint told us exactly when the window resets.
+                delay = min(last_error.retry_after, _LLM_RETRY_AFTER_CAP_S)
+            time.sleep(delay)
             logger.info("LLM text layer retry %d/%d (previous attempt: %s)",
                         attempt, _LLM_MAX_ATTEMPTS, last_error)
         try:
@@ -610,8 +652,19 @@ def _enrich_with_llm(results: list, country: str,
             return
         except requests.exceptions.Timeout:
             raise                    # window already burned — degrade now
+        except _LlmHttpError as exc:
+            last_error = exc
+            if (exc.status_code == 429 and exc.retry_after
+                    and exc.retry_after > _LLM_RETRY_AFTER_CAP_S):
+                # Quota resets minutes away — no retry can succeed inside
+                # this request. Seal the vector and serve the grid NOW.
+                _open_llm_cooldown(exc.retry_after)
+                raise
         except Exception as exc:  # noqa: BLE001 - transient upstream noise
             last_error = exc
+
+    if isinstance(last_error, _LlmHttpError) and last_error.status_code == 429:
+        _open_llm_cooldown(last_error.retry_after)   # stop hammering the quota
     raise last_error
 
 
@@ -643,7 +696,14 @@ def _generate_and_apply(results: list, country: str,
         timeout=_LLM_TIMEOUT_S,
     )
     if resp.status_code != 200:
-        raise RuntimeError(f"LLM endpoint returned HTTP {resp.status_code}")
+        # Carry the endpoint's own rate-limit hint (Groq sends Retry-After
+        # on 429) so the retry ladder can pace itself precisely.
+        headers = getattr(resp, "headers", None) or {}
+        try:
+            retry_after = float(headers.get("retry-after"))
+        except (TypeError, ValueError):
+            retry_after = None
+        raise _LlmHttpError(resp.status_code, retry_after)
 
     generated = _extract_json(resp.json()["choices"][0]["message"]["content"])
     by_index = {int(item["index"]): item for item in generated["items"]}
@@ -745,13 +805,20 @@ def recommend_for_items(items: list, country: str = None) -> dict:
     provider = "local_knowledge_base"
     api_key, model, api_url = _llm_settings()
     if api_key and model and api_url:
-        try:
-            _enrich_with_llm(results, country_code, api_key, model, api_url)
-            provider = "llm_enriched"
-        except Exception as exc:  # noqa: BLE001 - ANY LLM issue degrades gracefully
-            logger.warning("LLM text layer failed (%s); serving the local "
-                           "knowledge-base copy instead.", exc)
+        if _llm_cooling_down():
+            # Rate-limit breaker open: zero outbound flights — the previous
+            # 429 told us the quota window; hammering it again helps nobody.
+            logger.info("LLM text layer in rate-limit cooldown; serving the "
+                        "local knowledge-base copy without a network call.")
             provider = "local_fallback"
+        else:
+            try:
+                _enrich_with_llm(results, country_code, api_key, model, api_url)
+                provider = "llm_enriched"
+            except Exception as exc:  # noqa: BLE001 - ANY LLM issue degrades gracefully
+                logger.warning("LLM text layer failed (%s); serving the local "
+                               "knowledge-base copy instead.", exc)
+                provider = "local_fallback"
 
     return {
         "items": results,

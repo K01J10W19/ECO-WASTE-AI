@@ -22,6 +22,14 @@ from app.services.classification_service import MATERIAL_CLASSES
 from app.utils.errors import ApiError
 
 
+@pytest.fixture(autouse=True)
+def _reset_llm_rate_limit_breaker():
+    """The 429 cooldown breaker is module-level state; isolate every test."""
+    rs._llm_cooldown_until = 0.0
+    yield
+    rs._llm_cooldown_until = 0.0
+
+
 # --- lockstep: taxonomy x paths x factors x knowledge -------------------------
 
 def test_every_material_has_exactly_three_disposal_paths():
@@ -463,10 +471,11 @@ def test_endpoint_blank_country_defaults_to_global(client):
 
 # --- v3.6 LLM text layer (mocked OpenAI-compatible endpoint) ------------------
 
-def _llm_http_response(status_code=200, content_text=""):
+def _llm_http_response(status_code=200, content_text="", headers=None):
     """Fake requests.Response for a chat-completions call."""
     return types.SimpleNamespace(
         status_code=status_code,
+        headers=headers or {},
         json=lambda: {"choices": [{"message": {"content": content_text}}]})
 
 
@@ -582,10 +591,75 @@ def test_llm_rate_limit_falls_back_to_local_grid(app, monkeypatch):
 
     assert len(calls) == 3                              # all attempts exhausted
     assert out["provider"] == "local_fallback"          # identity tag intact
+    assert rs._llm_cooling_down()                       # breaker opens on 429
     landfill = next(p for p in out["items"][0]["recommendations"]
                     if p["method"] == "landfill")
     assert landfill["environmental_cons"] == \
         rs.EXPERT_KNOWLEDGE["paper"]["landfill"]["cons"]   # grid copy served
+    RecommendResponse(**out)
+
+
+def test_llm_429_honors_retry_after_header(app, monkeypatch):
+    # Groq sends Retry-After on 429 — the retry must pace to the server's
+    # hint (not the blind default backoff), then succeed inside the window.
+    sleeps = []
+    monkeypatch.setattr(rs.time, "sleep", lambda s: sleeps.append(s))
+    calls = []
+
+    def flaky_post(url, json=None, headers=None, timeout=None):
+        calls.append(1)
+        if len(calls) == 1:
+            return _llm_http_response(429, headers={"retry-after": "3"})
+        return _llm_http_response(200, _valid_generation_from(json))
+
+    monkeypatch.setattr(requests, "post", flaky_post)
+
+    with app.app_context():
+        app.config["LLM_API_KEY"] = "k"
+        out = rs.recommend_for_items([{"material": "glass", "weight_kg": 1.0}])
+
+    assert out["provider"] == "llm_enriched"
+    assert len(calls) == 2
+    assert sleeps == [3.0]                      # the server's hint, verbatim
+
+
+def test_llm_429_with_long_retry_after_degrades_instantly(app, monkeypatch):
+    # A Retry-After far beyond the cap = the quota window is minutes away.
+    # Burning two more doomed attempts helps nobody: ONE call, immediate
+    # local fallback, and the cooldown breaker opens.
+    monkeypatch.setattr(rs.time, "sleep", lambda _s: None)
+    calls = []
+
+    def rate_limited(*a, **k):
+        calls.append(1)
+        return _llm_http_response(429, headers={"retry-after": "60"})
+
+    monkeypatch.setattr(requests, "post", rate_limited)
+
+    with app.app_context():
+        app.config["LLM_API_KEY"] = "k"
+        out = rs.recommend_for_items([{"material": "paper", "weight_kg": 1.0}])
+
+    assert len(calls) == 1                      # zero doomed retries
+    assert out["provider"] == "local_fallback"
+    assert rs._llm_cooling_down()               # breaker open (~60 s window)
+
+
+def test_llm_cooldown_breaker_blocks_all_outbound_flights(app, monkeypatch):
+    # While the breaker is open, /api/recommend must serve the local grid
+    # with ZERO network calls — the 429 vector is sealed, not just retried.
+    calls = []
+    monkeypatch.setattr(requests, "post", lambda *a, **k: calls.append(1))
+    rs._llm_cooldown_until = rs.time.monotonic() + 60
+
+    with app.app_context():
+        app.config["LLM_API_KEY"] = "k"
+        out = rs.recommend_for_items([{"material": "metal", "weight_kg": 1.0}])
+
+    assert calls == []                          # not a single outbound flight
+    assert out["provider"] == "local_fallback"
+    # Numbers, ranking and local copy stay fully intact meanwhile.
+    assert len(out["items"][0]["recommendations"]) == 3
     RecommendResponse(**out)
 
 

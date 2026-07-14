@@ -769,11 +769,12 @@ function setStatus(text, tone = "ok") {
     + (tone === "ok" ? "bg-teal-500" : "bg-amber-500");
 }
 
-async function api(path, payload) {
+async function api(path, payload, signal) {
   const res = await fetch(path, {
     method: "POST",
     headers: payload instanceof FormData ? {} : { "Content-Type": "application/json" },
     body: payload instanceof FormData ? payload : JSON.stringify(payload),
+    signal,
   });
   const body = await res.json();
   if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
@@ -1034,17 +1035,28 @@ function impactPayloadItems() {
     : { id: it.id, material: it.class_name, box_area_px: it.box_area_px });
 }
 
+// SINGLE-FLIGHT dedup: each refresher keeps at most ONE request in the air.
+// A new trigger (country flip mid-audit, rapid weight edits past the
+// debounce) aborts the superseded call — so a scan can never stack two
+// concurrent /api/recommend flights (= two LLM calls) and a slow stale
+// response can never overwrite fresher state.
+let impactCtl = null, recsCtl = null;
+
 async function refreshImpact() {
   if (!state.items.length) return;
+  if (impactCtl) impactCtl.abort();
+  const ctl = (impactCtl = new AbortController());
   try {
     const data = await api("/api/calculate-impact",
-      { items: impactPayloadItems(), country: state.country });
+      { items: impactPayloadItems(), country: state.country }, ctl.signal);
+    if (ctl !== impactCtl) return;      // superseded while we were in flight
     data.items.forEach(row => {
       state.audit[row.id] = row;
       if (!state.edited.has(row.id)) state.weights[row.id] = row.weight_kg;
     });
     state.auditMeta = { provider: data.provider, total: data.total_co2e_kg };
   } catch (err) {
+    if (err.name === "AbortError") return;   // deliberately superseded — quiet
     toast("Carbon audit unavailable: " + err.message);
   }
   renderItems();
@@ -1054,13 +1066,16 @@ async function refreshImpact() {
 
 async function refreshRecommendations() {
   if (!state.items.length) return;
+  if (recsCtl) recsCtl.abort();
+  const ctl = (recsCtl = new AbortController());
   try {
     const data = await api("/api/recommend", {
       items: state.items.map(it => state.edited.has(it.id)
         ? { material: it.class_name, weight_kg: state.weights[it.id] }
         : { material: it.class_name, box_area_px: it.box_area_px }),
       country: state.country,
-    });
+    }, ctl.signal);
+    if (ctl !== recsCtl) return;        // superseded while we were in flight
     data.items.forEach((rec, i) => {
       const id = state.items[i].id;
       state.recs[id] = rec;
@@ -1083,6 +1098,7 @@ async function refreshRecommendations() {
         ? "live grid intensity" : ($("geo-mode-lower").textContent);
     }
   } catch (err) {
+    if (err.name === "AbortError") return;   // deliberately superseded — quiet
     toast("Recommendations unavailable: " + err.message);
   }
   renderItems();
