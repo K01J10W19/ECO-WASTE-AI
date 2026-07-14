@@ -83,6 +83,19 @@ class DisposalRecommendation(BaseModel):
     action_steps: List[str] = Field(min_length=2, max_length=2)
 
 
+class ActionMedia(BaseModel):
+    """Option A item-level media block: the LLM writes a hyper-localized
+    SEARCH QUERY (never a URL — hallucinated links are impossible) which the
+    backend resolves to ONE live YouTube tutorial embed, plus an advanced
+    expert tip. Keyless/offline → the verified universal fallback video."""
+
+    video_search_query: str               # LLM-localized or local template
+    expert_tip: str                       # authoritative material/country hack
+    video_embed_url: str                  # https://www.youtube.com/embed/<id>
+    video_title: str
+    video_provider: Literal["youtube_live", "fallback"]
+
+
 class RecommendedItem(BaseModel):
     """One simulated item with its full recommendation array (applicable
     paths ranked first, banned paths flagged at the tail)."""
@@ -94,6 +107,7 @@ class RecommendedItem(BaseModel):
     best_method: str                      # the rank-1 APPLICABLE method id
     max_saving_kg: float = Field(ge=0.0)  # worst-vs-best among APPLICABLE paths
     recommendations: List[DisposalRecommendation] = Field(min_length=3, max_length=3)
+    action_media: ActionMedia             # Option A tutorial video + expert tip
 
 
 class RecommendSummary(BaseModel):

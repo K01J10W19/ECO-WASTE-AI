@@ -485,7 +485,10 @@ def _valid_generation_from(request_body):
     """Build a fully-covering, child-simple generation from the sent context."""
     ctx = jsonlib.loads(request_body["messages"][1]["content"])
     return jsonlib.dumps({"items": [
-        {"index": item["index"], "paths": [
+        {"index": item["index"],
+         "video_search_query": "malaysia coloured recycling bins tutorial",
+         "expert_tip": "Rinse containers before binning so sorters accept them.",
+         "paths": [
             {"method": path["method"],
              "encouraging_verdict": f"Rank {path['rank']} — nice and simple!",
              "environmental_pros": "Saves electricity for your town.",
@@ -540,6 +543,86 @@ def test_llm_layer_enriches_fields_and_localizes_country(app, monkeypatch):
     RecommendResponse(**out)
 
 
+def test_action_media_defaults_from_local_grid_without_llm(app):
+    # Hermetic (no LLM key, no YouTube key): the media block must still be
+    # complete — local query template + EXPERT_TIPS + the fallback video —
+    # so the frontend parser never meets a missing node.
+    with app.app_context():
+        out = rs.recommend_for_items(
+            [{"material": "glass", "weight_kg": 1.0}], country="MY")
+
+    media = out["items"][0]["action_media"]
+    assert media["video_search_query"] == "how to recycle glass at home Malaysia"
+    assert media["expert_tip"] == rs.EXPERT_TIPS["glass"]
+    assert media["video_provider"] == "fallback"
+    assert media["video_embed_url"].startswith("https://www.youtube.com/embed/")
+    assert media["video_title"].strip()
+    RecommendResponse(**out)
+
+
+def test_llm_localizes_media_and_backend_resolves_video(app, monkeypatch):
+    # The LLM writes ONLY the search query + tip; the backend resolves the
+    # query through the YouTube plugin (mocked here as a live hit).
+    monkeypatch.setattr(requests, "post",
+                        lambda url, json=None, headers=None, timeout=None:
+                        _llm_http_response(200, _valid_generation_from(json)))
+    seen_queries = []
+
+    def fake_yt(query):
+        seen_queries.append(query)
+        return {"video_embed_url": "https://www.youtube.com/embed/LIVE123",
+                "video_title": "Local bins explained",
+                "video_provider": "youtube_live"}
+    monkeypatch.setattr(rs, "fetch_live_youtube_data", fake_yt)
+
+    with app.app_context():
+        app.config["LLM_API_KEY"] = "k"
+        out = rs.recommend_for_items(
+            [{"material": "plastic", "weight_kg": 0.5}], country="MY")
+
+    assert out["provider"] == "llm_enriched"
+    media = out["items"][0]["action_media"]
+    assert media["video_search_query"] == \
+        "malaysia coloured recycling bins tutorial"   # LLM's localized query
+    assert seen_queries == [media["video_search_query"]]
+    assert media["video_provider"] == "youtube_live"
+    assert media["video_embed_url"].endswith("/embed/LIVE123")
+    assert media["expert_tip"].startswith("Rinse containers")
+    RecommendResponse(**out)
+
+
+def test_llm_url_shaped_video_query_is_rejected_atomically(app, monkeypatch):
+    # The model must emit a SEARCH QUERY, never a URL — a URL-shaped value
+    # fails validation and the whole enrichment reverts to the local grid.
+    monkeypatch.setattr(rs.time, "sleep", lambda _s: None)
+
+    def url_query_post(url, json=None, headers=None, timeout=None):
+        ctx = jsonlib.loads(json["messages"][1]["content"])
+        return _llm_http_response(200, jsonlib.dumps({"items": [
+            {"index": item["index"],
+             "video_search_query": "https://youtu.be/hallucinated12",
+             "expert_tip": "Rinse containers before binning so sorters accept them.",
+             "paths": [
+                {"method": p["method"],
+                 "encouraging_verdict": "Rank one, a really good clean pick!",
+                 "environmental_pros": "Saves lots of power for the town.",
+                 "environmental_cons": "Dirty items get thrown away instead.",
+                 "action_steps": ["Rinse it clean at home first.",
+                                  "Take it to the right local bin."]}
+                for p in item["paths"]]}
+            for item in ctx["items"]]}))
+
+    monkeypatch.setattr(requests, "post", url_query_post)
+    with app.app_context():
+        app.config["LLM_API_KEY"] = "k"
+        out = rs.recommend_for_items([{"material": "metal", "weight_kg": 1.0}])
+
+    assert out["provider"] == "local_fallback"
+    media = out["items"][0]["action_media"]
+    assert media["video_search_query"] == "how to recycle metal at home"
+    assert media["expert_tip"] == rs.EXPERT_TIPS["metal"]
+
+
 def test_llm_malformed_action_steps_falls_back_to_local_grid(app, monkeypatch):
     # The model returns only ONE step instead of two → the whole enrichment
     # is rejected atomically and the local neutral steps survive intact.
@@ -548,7 +631,10 @@ def test_llm_malformed_action_steps_falls_back_to_local_grid(app, monkeypatch):
     def one_step_post(url, json=None, headers=None, timeout=None):
         ctx = jsonlib.loads(json["messages"][1]["content"])
         return _llm_http_response(200, jsonlib.dumps({"items": [
-            {"index": item["index"], "paths": [
+            {"index": item["index"],
+             "video_search_query": "recycle plastic bins tutorial",
+             "expert_tip": "Rinse containers before binning so sorters accept them.",
+             "paths": [
                 {"method": p["method"],
                  "encouraging_verdict": "Rank one, a really good clean pick!",
                  "environmental_pros": "Saves lots of power for the town.",
@@ -724,7 +810,10 @@ def test_llm_telegram_fragments_fail_the_quality_floor(app, monkeypatch):
     def terse_post(url, json=None, headers=None, timeout=None):
         ctx = jsonlib.loads(json["messages"][1]["content"])
         return _llm_http_response(200, jsonlib.dumps({"items": [
-            {"index": item["index"], "paths": [
+            {"index": item["index"],
+             "video_search_query": "recycle plastic bins tutorial",
+             "expert_tip": "Rinse containers before binning so sorters accept them.",
+             "paths": [
                 {"method": p["method"], "encouraging_verdict": "Great, rank 1!",
                  "environmental_pros": "Saves 1.7 kg",
                  "environmental_cons": "None"}
@@ -761,10 +850,13 @@ def test_partial_llm_coverage_is_rejected_atomically(app, monkeypatch):
         ctx = jsonlib.loads(json["messages"][1]["content"])
         first = ctx["items"][0]["paths"][0]
         return _llm_http_response(200, jsonlib.dumps({"items": [
-            {"index": 0, "paths": [{"method": first["method"],
-                                    "encouraging_verdict": "x",
-                                    "environmental_pros": "y",
-                                    "environmental_cons": "z"}]}]}))
+            {"index": 0,
+             "video_search_query": "recycle plastic bins tutorial",
+             "expert_tip": "Rinse containers before binning so sorters accept them.",
+             "paths": [{"method": first["method"],
+                        "encouraging_verdict": "x",
+                        "environmental_pros": "y",
+                        "environmental_cons": "z"}]}]}))
 
     monkeypatch.setattr(requests, "post", fake_post)
 
@@ -790,6 +882,8 @@ def test_fallback_grid_and_verdicts_respect_the_word_budget():
             assert len(steps) == 2, (material, method)
             for step in steps:
                 assert step.strip() and len(step.split()) <= 22, (material, method)
+        # Expert-tip grid: one advanced tip per material, same word ceiling.
+        assert len(rs.EXPERT_TIPS[material].split()) <= 28, material
         for path in rs.simulate_disposal_paths(material, 1.0):
             assert len(path["encouraging_verdict"].split()) <= 28, \
                 (material, path["method"])
@@ -805,6 +899,8 @@ def test_llm_context_carries_full_country_name_and_prompt_directive():
     # directive references (so the model localizes to the right nation).
     assert "CRITICAL DIRECTIVE" in rs.LLM_SYSTEM_PROMPT
     assert "action_steps" in rs.LLM_SYSTEM_PROMPT
+    assert "video_search_query" in rs.LLM_SYSTEM_PROMPT
+    assert "expert_tip" in rs.LLM_SYSTEM_PROMPT
     results = rs.recommend_for_items(
         [{"material": "plastic", "weight_kg": 0.5}], country="DE")
     # recommend_for_items resolves numbers locally; build the context directly.

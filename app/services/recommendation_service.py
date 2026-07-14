@@ -69,6 +69,7 @@ from app.services.carbon_service import (
     resolve_grid_intensity,
 )
 from app.services.classification_service import DISPLAY_NAMES, MATERIAL_CLASSES
+from app.services.youtube_service import fetch_live_youtube_data
 from app.utils.errors import ApiError
 
 logger = logging.getLogger(__name__)
@@ -350,6 +351,41 @@ EXPERT_ACTION_STEPS = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# LOCAL EXPERT TIPS (Option A companion) — one advanced, authoritative
+# recycling hack / material nuance per material. The deterministic fallback
+# for the item-level ``expert_tip`` field; the LLM layer replaces it with a
+# country-tailored version. Same ≤25-word ceiling (test-enforced).
+# ---------------------------------------------------------------------------
+EXPERT_TIPS = {
+    "plastic": "Check the resin code: types 1 (PET) and 2 (HDPE) recycle "
+               "almost everywhere, while black plastic often defeats the "
+               "optical sorters.",
+    "glass": "Never mix in pyrex, ceramics or mirrors — their different "
+             "melting points can ruin an entire furnace batch of recycled "
+             "glass.",
+    "metal": "A quick magnet test splits steel from aluminium, and rinsed "
+             "cans smelt cleaner with far less metal lost as dross.",
+    "cardboard": "Peel off plastic tape and keep card bone-dry — wet fibres "
+                 "shorten and downgrade the pulp before it ever reaches the "
+                 "mill.",
+    "paper": "Keep sheets whole: shredded fibres are too short for most "
+             "mills, and thermal receipts carry coatings that contaminate "
+             "the batch.",
+    "biodegradable": "Feed compost a 2:1 mix of dry browns to wet greens — "
+                     "a hot, aerated pile even breaks down citrus peel and "
+                     "small bones.",
+    "general rubbish": "Scan for hidden hazards first: one loose lithium "
+                       "battery in mixed waste can set an entire collection "
+                       "truck on fire.",
+}
+
+
+def _default_video_query(material: str, country_code) -> str:
+    """Deterministic fallback search query (LLM replaces it when active)."""
+    base = f"how to recycle {material} at home"
+    return f"{base} {_country_display(country_code)}" if country_code else base
+
 
 # ---------------------------------------------------------------------------
 # v3.6 LLM GENERATION PIPELINE ("Hyper-Simple & Country-Aware").
@@ -441,6 +477,17 @@ For EVERY path of EVERY item write exactly FOUR fields:
    and rules. Step 1 = prepare it at home; Step 2 = where/how it goes. Each
    step is one plain imperative sentence, 4 to 20 words.
 
+For EVERY item ALSO write exactly TWO item-level fields (beside "paths"):
+5. "video_search_query" — a highly targeted YouTube search string for a
+   practical disposal tutorial for this material in country_name (e.g.
+   "Malaysia coloured recycling bins tutorial", "Germany Pfand bottle return
+   guide", "Official WRAP UK glass recycling guidelines"). 3 to 10 plain
+   words, no quotes inside, never a URL.
+6. "expert_tip" — 1-2 concise ADVANCED sentences: an authoritative recycling
+   hack or professional material nuance tailored to this material in
+   country_name. The 8-25 word rule applies; keep the words simple even
+   though the insight is expert-level.
+
 HARD RULES
 - Text fields (1-3) are 1-2 COMPLETE sentences, 8 to 25 words. NEVER telegram
   fragments ("Great, rank 1!") and NEVER the word "None" alone — every
@@ -455,7 +502,8 @@ HARD RULES
   "saving electricity", "trash on our beaches", "burning coal".
 - Use ONLY the numbers provided — never invent or change them.
 - Reply with STRICT JSON ONLY — no markdown, no commentary — shaped:
-  {"items":[{"index":0,"paths":[{"method":"recycling",
+  {"items":[{"index":0,"video_search_query":"...","expert_tip":"...",
+  "paths":[{"method":"recycling",
   "encouraging_verdict":"...","environmental_pros":"...",
   "environmental_cons":"...","action_steps":["...","..."]}]}]}
   Cover every item and every path exactly once, keeping the given
@@ -823,6 +871,21 @@ def _generate_and_apply(results: list, country: str,
 
     staged = []
     for idx, item in enumerate(results):
+        gen_item = by_index[idx]
+        # Item-level Option-A fields: the localized tutorial SEARCH QUERY
+        # (never a URL — the backend resolves it via YouTube v3) + the
+        # advanced expert tip. Both validated before anything is applied.
+        query = str(gen_item["video_search_query"]).strip()   # KeyError -> fallback
+        if not 3 <= len(query.split()) <= 12 or "http" in query.lower():
+            raise ValueError(
+                f"LLM 'video_search_query' out of shape: {query!r}")
+        tip = str(gen_item["expert_tip"]).strip()             # KeyError -> fallback
+        if len(tip.split()) < _LLM_MIN_FIELD_WORDS:
+            raise ValueError(
+                f"LLM 'expert_tip' below the quality floor: {tip!r}")
+        staged.append((item["action_media"], "video_search_query", query))
+        staged.append((item["action_media"], "expert_tip", tip))
+
         by_method = {p["method"]: p for p in by_index[idx]["paths"]}
         for path in item["recommendations"]:
             if not path["is_applicable"]:
@@ -923,6 +986,14 @@ def recommend_for_items(items: list, country: str = None) -> dict:
                     pool_paths[-1]["carbon_impact_kg"]
                     - pool_paths[0]["carbon_impact_kg"], 4),
                 "recommendations": ranked,
+                # Option A media block: deterministic defaults now; the LLM
+                # may localize query+tip, then the YouTube plugin resolves
+                # the query to a live embed below.
+                "action_media": {
+                    "video_search_query": _default_video_query(material,
+                                                               country_code),
+                    "expert_tip": EXPERT_TIPS[material],
+                },
             })
 
     # v3.6 text layer: LLM rewrite when configured, seamless local fallback.
@@ -943,6 +1014,14 @@ def recommend_for_items(items: list, country: str = None) -> dict:
                 logger.warning("LLM text layer failed (%s); serving the local "
                                "knowledge-base copy instead.", exc)
                 provider = "local_fallback"
+
+    # Option A tutorial plugin: resolve each item's (possibly LLM-localized)
+    # search query to ONE live YouTube embed. Request-thread only, cached per
+    # unique query, and never raises — blank key serves the verified
+    # universal fallback with zero network calls.
+    for item in results:
+        item["action_media"].update(
+            fetch_live_youtube_data(item["action_media"]["video_search_query"]))
 
     return {
         "items": results,

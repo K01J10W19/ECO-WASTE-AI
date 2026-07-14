@@ -81,6 +81,13 @@ class BaseConfig:
     LLM_API_URL = os.getenv("LLM_API_URL",
                             "https://api.groq.com/openai/v1/chat/completions")
 
+    # --- YouTube Data API v3 (optional Action-Protocol tutorial videos) ---
+    # Resolves the LLM's localized video_search_query to ONE live tutorial
+    # embed. Blank key = the verified universal fallback video (no network).
+    # Free quota: 10,000 units/day; each search costs 100 — the service
+    # caches per query so repeated scans are free.
+    YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
+
 
 class DevelopmentConfig(BaseConfig):
     DEBUG = True
@@ -98,6 +105,7 @@ class TestingConfig(BaseConfig):
     # Tests that exercise the live paths set these explicitly (HTTP mocked).
     CLIMATIQ_API_KEY = ""
     LLM_API_KEY = ""
+    YOUTUBE_API_KEY = ""
 
 
 config_by_name = {

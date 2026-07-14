@@ -1318,9 +1318,10 @@ const RANK_ACCENT = {
   2: { edge: "#f59e0b", bg: "bg-amber-50/40",   tag: "text-amber-700" },    // amber-500
   3: { edge: "#f43f5e", bg: "bg-rose-50/40",    tag: "text-rose-700" },     // rose-500
 };
-function actionBannerHtml(path) {
+function actionBannerHtml(path, rec) {
   const steps = Array.isArray(path.action_steps) ? path.action_steps : [];
-  if (steps.length < 2) return "";        // schema guarantees 2 — defensive
+  const media = rec && rec.action_media ? rec.action_media : null;
+  if (steps.length < 2 && !media) return "";   // schema guarantees both — defensive
   const a = RANK_ACCENT[path.rank]
     || { edge: "#14b8a6", bg: "bg-teal-50/40", tag: "text-teal-700" };
   const chevron = `<span class="text-slate-400 font-bold px-1 select-none">➔</span>`;
@@ -1329,10 +1330,37 @@ function actionBannerHtml(path) {
       <span class="shrink-0 font-bold text-[11px] tracking-wide uppercase ${a.tag}">Step ${i + 1}</span>
       <span class="text-slate-700 font-medium text-xs md:text-sm">${highlightNums(s, path.rank)}</span>
     </span>`).join(chevron);
+
+  // Option A media: the SERVER resolved the LLM's search query into a
+  // guaranteed-live embed URL (or the verified universal fallback) — the
+  // model itself never writes URLs, so a hallucinated link cannot exist.
+  // Only the expanded card renders this panel, so the spec ids stay unique.
+  let mediaHtml = "";
+  if (media) {
+    const watchHref = esc(media.video_embed_url.replace("/embed/", "/watch?v="));
+    const binHref = "https://www.google.com/search?q="
+      + encodeURIComponent(countryName(state.country) + " recycling bin guidelines");
+    mediaHtml = `
+      <div class="expert-tip-box border-l-2 pl-3 my-2 border-l-slate-300">
+        <p class="text-[10px] font-bold tracking-wider uppercase ${a.tag}">Expert tip</p>
+        <p class="mt-1 text-[11px] leading-relaxed text-slate-600">${highlightNums(media.expert_tip, path.rank)}</p>
+      </div>
+      <iframe id="dmm-youtube-iframe" class="w-full aspect-video rounded-lg shadow-sm border border-slate-200 bg-zinc-900/5"
+        src="${esc(media.video_embed_url)}" title="${esc(media.video_title)}" loading="lazy"
+        referrerpolicy="strict-origin-when-cross-origin"
+        allow="accelerometer; clipboard-write; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+      <div class="flex items-center justify-between gap-x-3 gap-y-1 flex-wrap">
+        <a href="${watchHref}" target="_blank" rel="noopener" class="text-[11px] font-semibold ${a.tag} hover:underline">▶ Watch Full Tutorial</a>
+        <span class="font-mono-d text-[9px] uppercase tracking-[0.14em] text-slate-400 select-none">${media.video_provider === "youtube_live" ? "live · youtube v3" : "universal fallback"}</span>
+        <a href="${binHref}" target="_blank" rel="noopener" class="text-[11px] font-semibold text-slate-500 hover:text-slate-700 hover:underline">Check Local Bin Guidelines ↗</a>
+      </div>`;
+  }
+
   return `
-    <div class="mt-3 relative overflow-hidden rounded-xl border border-slate-100 ${a.bg} p-3.5 pt-8" style="border-left: 4px solid ${a.edge}">
+    <div class="bg-slate-50 border border-slate-100 rounded-xl p-4 pt-8 mt-4 relative flex flex-col space-y-4 overflow-hidden" style="border-left: 4px solid ${a.edge}">
       <span class="absolute top-2.5 right-3.5 text-[10px] font-bold tracking-wider uppercase text-slate-400 select-none">⚡ Action Protocol</span>
-      <div class="flex flex-row items-center flex-wrap gap-2 md:gap-4">${stepHtml}</div>
+      <div id="horizontal-step-flow" class="flex flex-row items-center flex-wrap gap-2 md:gap-4">${stepHtml}</div>
+      ${mediaHtml}
     </div>`;
 }
 
@@ -1383,7 +1411,7 @@ function tabsHtml(it) {
           <p class="text-[11px] leading-relaxed text-slate-600"><span class="font-semibold text-rose-700">Cons:</span> ${highlightNums(path.environmental_cons, path.rank)}</p>
         </div>
       </div>
-      ${actionBannerHtml(path)}
+      ${actionBannerHtml(path, rec)}
     </div>`;
 }
 

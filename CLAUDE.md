@@ -282,7 +282,7 @@ Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
 - **Backend:** Flask 3, Flask-SQLAlchemy, python-dotenv, requests, pydantic
 - **Frontend:** HTML5, Tailwind CSS (CDN), vanilla JavaScript (Fetch API), GSAP 3 (CDN) — the CarbIQ SPA (Canvas 2D `strokeRect` box rendering, self-hosted Inter/JetBrains Mono); `/carbon-lab` API tester stays dependency-free
 - **Database:** SQLite (via SQLAlchemy)
-- **External APIs:** Climatiq (carbon, Step 5) — Carbon Interface kept as alternate adapter
+- **External APIs:** Climatiq (carbon, Step 5) — Carbon Interface kept as alternate adapter; YouTube Data API v3 (Option-A Action-Protocol tutorials, keyless fallback)
 - **Optional:** any free OpenAI-compatible LLM endpoint (Groq / OpenRouter / Gemini compat / local Ollama) for the v3.6 DMM text layer — plain `requests`, no SDK
 - **Testing:** pytest, pytest-mock (both model towers mocked; no network/GPU in tests)
 - **Serving (prod):** gunicorn
@@ -309,7 +309,8 @@ waste-detection-app/
 │   │   ├── detection_service.py        # ORCHESTRATOR: Stage 1 segment + padding layer + compose
 │   │   ├── classification_service.py   # Stage 2: TrashNet ViT material classifier
 │   │   ├── carbon_service.py           # dual-stage carbon engine: γ proxy + Climatiq audit + disposal matrix
-│   │   └── recommendation_service.py   # Module 3 DMM: 3-path simulation + ranking + knowledge base
+│   │   ├── recommendation_service.py   # Module 3 DMM: 3-path simulation + ranking + knowledge base
+│   │   └── youtube_service.py          # Option A: LLM search query → live YouTube v3 tutorial embed
 │   ├── models/scan.py     # SQLite model for optional scan history
 │   ├── schemas/           # pydantic contracts: detection.py, carbon.py, recommendation.py
 │   ├── utils/errors.py    # ApiError + register_error_handlers()
@@ -588,6 +589,18 @@ Rules:
   after all that does the layer log a warning and serve the local grid —
   `provider` labels the outcome:
   `llm_enriched` | `local_knowledge_base` (no key) | `local_fallback`.
+- **Option A — Action-Protocol media (`action_media`, item-level):** the LLM
+  additionally writes TWO item-level fields — a hyper-localized
+  `video_search_query` (validated: 3–12 words, never a URL) and an advanced
+  `expert_tip` — staged atomically with the path fields. After enrichment,
+  `youtube_service.fetch_live_youtube_data(query)` resolves the query to ONE
+  guaranteed-live tutorial (`https://www.youtube.com/embed/<id>`, YouTube
+  Data API v3, `maxResults=1`, `videoEmbeddable=true`, cached per query).
+  Local fallbacks mirror the schema exactly: `_default_video_query`
+  template + the 7-entry `EXPERT_TIPS` grid + the oEmbed-verified universal
+  fallback video (`FALLBACK_VIDEO`, blank key = zero network). Per-item
+  payload block: `{ video_search_query, expert_tip, video_embed_url,
+  video_title, video_provider: "youtube_live" | "fallback" }`.
 - **Weight resolution (dual-stage aware):** a user-verified `weight_kg` (Stage B)
   always wins; otherwise `box_area_px / γ` (the Stage-A blind proxy — the same
   calibration `/predict` uses), via the SHARED
@@ -640,7 +653,11 @@ Rules:
     process tabs (rank-numbered labels, Optimal/Acceptable/Warning chips,
     per-path CO2e) + the child-simple verdict and pros/cons + a static
     **⚡ ACTION PROTOCOL** capsule (rank-coloured left accent, horizontal
-    two-step `➔` chevron pipeline from `action_steps`); the section header
+    two-step `➔` chevron pipeline from `action_steps`, the rank-tinted
+    **Expert tip** callout, an `aspect-video` iframe playing the
+    server-resolved `action_media.video_embed_url`, and the "Watch Full
+    Tutorial" / "Check Local Bin Guidelines" anchor row with a
+    live-vs-fallback provenance tag); the section header
     shows the text provider (`llm_enriched` / fallback). Nationally
     banned paths (v3.7) render as hard-disabled struck-through pills — no
     rank number, no status badge, hover reason + "not nationally
@@ -702,6 +719,8 @@ LLM_API_URL=https://api.groq.com/openai/v1/chat/completions
                                   # any OpenAI-compatible chat-completions URL:
                                   # Groq (free default) | OpenRouter | Gemini compat
                                   # | http://localhost:11434/v1/chat/completions (Ollama)
+YOUTUBE_API_KEY=                  # OPTIONAL Option-A tutorial videos (YouTube Data v3)
+                                  # blank = verified universal fallback video, no network
 
 MODEL_PATH=models/yolov8n-waste-det.pt   # Stage 1 specialist detector (auto-fetched if missing)
                                           # A/B: models/yolov8m-seg-trash.pt | yolo26x-seg.pt
@@ -958,14 +977,22 @@ retraining), whereas CLIP's was editable text.
   BEFORE the fan-out, with a never-raises fallback ladder
   (`GRID_INTENSITY_FALLBACK` → 0.207 anchor); recommendations must never
   502 or block because of it; (2) the v3.6 LLM layer — it may ONLY rewrite
-  the four text fields — verdict, pros, cons, `action_steps` (never ranks,
-  methods, numbers or item order), runs
+  the TEXT fields (per-path verdict/pros/cons/`action_steps` + per-item
+  `video_search_query`/`expert_tip`; never ranks, methods, numbers, URLs or
+  item order), runs
   once per request (ONE batched flight for ALL items — `/api/recommend` IS
   the batch endpoint; never add per-item LLM calls), honours `Retry-After`
   on 429 and keeps the module-level time-based cooldown breaker
   (`_llm_cooldown_until`) — never remove it or re-hammer an exhausted
   quota — and EVERY failure mode must degrade to the local grid with
-  `provider: "local_fallback"`. Never move either into the workers.
+  `provider: "local_fallback"`; (3) the Option-A YouTube tutorial plugin
+  (`youtube_service.fetch_live_youtube_data`) — resolves the LLM's SEARCH
+  QUERY (the model never writes URLs — hallucinated links are impossible)
+  to ONE embeddable video via the v3 search endpoint, cached per unique
+  query (each search costs 100 of the 10k daily free units), and NEVER
+  raises: blank `YOUTUBE_API_KEY` or any upstream failure serves the
+  oEmbed-verified universal fallback video with zero network calls.
+  Never move any of the three into the workers.
 - The LLM endpoint is **OpenAI-compatible chat-completions via `requests`**
   (`LLM_API_URL`/`LLM_MODEL`/`LLM_API_KEY`) — do not add provider SDKs, and
   keep `TestingConfig.LLM_API_KEY = ""` so tests stay hermetic (LLM tests
@@ -995,8 +1022,10 @@ retraining), whereas CLIP's was editable text.
 - **Never** make tests depend on the network, weight downloads, or a GPU — mock both
   towers and external APIs.
 - The app must run end-to-end **without** an LLM key (the DMM's numbers are
-  rule-based and the local text grid always exists) and **without** a Climatiq
-  key (local dummy factors take over automatically).
+  rule-based and the local text grid always exists), **without** a Climatiq
+  key (local dummy factors take over automatically) and **without** a
+  YouTube key (the oEmbed-verified universal fallback video serves with
+  zero network calls).
 - Keep the carbon numbers AND the DMM ranking free of any trained model —
   coefficients, arithmetic and a structured knowledge base only; the LLM may
   phrase the story, never compute it.
