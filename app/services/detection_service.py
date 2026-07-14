@@ -56,14 +56,23 @@ _PAD_FILL = (114, 114, 114)
 # Processing layer: the ViT's native input resolution.
 _PATCH_SIZE = 224
 
-# Stage-1 suppression (duplicate-box guard): Ultralytics NMS is per-class by
-# default, so one physical object firing under TWO coarse labels (e.g. "Paper"
-# AND "Waste") survives suppression twice — and Stage 2 then names both crops
-# identically, painting duplicate overlapped frames on a single item.
-# agnostic_nms=True merges candidates ACROSS classes at this IoU, so exactly
-# one box survives per physical object. The NMS-free A/B baselines (YOLO26,
-# RT-DETR) accept and simply ignore these arguments.
-_NMS_IOU = 0.45
+# Stage-1 suppression — tuned against the TWO observed failure modes:
+#   * DUPLICATE FRAMES (fixed by agnostic_nms=True): Ultralytics NMS is
+#     per-class by default, so one physical object firing under TWO coarse
+#     labels (e.g. "Paper" AND "Waste") survived suppression twice and
+#     Stage 2 named both crops identically. Agnostic NMS merges candidates
+#     ACROSS classes — one box per physical object. NOTE: same-class boxes
+#     are compared identically in per-class and agnostic modes, so this
+#     flag is orthogonal to the cluster case below — flipping it back to
+#     per-class would NOT free clusters, only resurrect the duplicates.
+#   * CLUSTER MERGING (fixed by this IoU threshold): tightly packed
+#     homogeneous items (three glass bottles shoulder to shoulder) merged
+#     into one macro box at iou=0.45 — adjacent distinct items can
+#     legitimately overlap ~50%. Raised to 0.60 (2026-07-14): boxes merge
+#     only above 60% IoU, so clustered sub-objects survive, while a true
+#     double-fire on ONE object (IoU typically >= 0.8) still collapses.
+# The NMS-free A/B baselines (YOLO26, RT-DETR) accept and ignore both args.
+_NMS_IOU = 0.60
 
 # ---------------------------------------------------------------------------
 # Method B calibration constants (Plasticity Index psi).

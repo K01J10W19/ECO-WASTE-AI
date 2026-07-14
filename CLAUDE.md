@@ -53,7 +53,8 @@ rarely fires; nano backbone = max fps                     │
 Plastic/Waste) noted as `located_as`,             ψ TIE-BREAK: ambiguous plastic-vs-
 NEVER trusted for identity                        glass calls corrected by physics
 conf=0.15 (recall-first) + CLASS-AGNOSTIC
-NMS (iou=0.45): one box per physical object
+NMS (iou=0.60): one box per object,
+tight same-class clusters preserved
          │
          └── Processing layer (anchored directly on box.xyxy):
              (a) CONTEXT-AWARE SQUARE PADDING:
@@ -158,7 +159,7 @@ Upload (multipart image)
   → POST /api/predict (thin controller: validate, save, delegate)
     → detection_service.analyze_waste_pipeline(image_path)
        1. Stage 1: specialist waste detector (models/yolov8n-waste-det.pt,
-          auto-fetched if missing), predict (conf 0.15 + agnostic NMS, iou 0.45)
+          auto-fetched if missing), predict (conf 0.15 + agnostic NMS, iou 0.60)
           → per instance: bbox via box.xyxy (clamped), box_confidence,
             located_as (Glass/Metal/Paper/Plastic/Waste — diagnostic),
             box_area_px = (x2-x1)*(y2-y1)
@@ -215,11 +216,16 @@ Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
   that approach is archived (§11) after failing empirically. `located_as` is
   diagnostic-only; never surface it as the material or branch on it.
 - The Stage-1 predict call passes `conf` **plus CLASS-AGNOSTIC suppression
-  (`agnostic_nms=True, iou=0.45`)**. Default per-class NMS let one physical object
+  (`agnostic_nms=True, iou=0.60`)** — the two knobs balance two OBSERVED failure
+  modes. (1) Duplicate frames: default per-class NMS let one physical object
   survive as overlapping boxes under different coarse labels (e.g. "Paper" +
-  "Waste"), which Stage 2 then named identically — duplicate frames on one item.
-  Agnostic NMS merges candidates across classes: one box per object. The NMS-free
-  A/B baselines (YOLO26, RT-DETR) accept and ignore these args. No further knobs.
+  "Waste"), which Stage 2 named identically — agnostic NMS merges across
+  classes. (2) Cluster merging: at iou=0.45 tightly packed same-class items
+  (three bottles) collapsed into one macro box — 0.60 preserves clustered
+  sub-objects while a true double-fire on ONE object (IoU ≥ ~0.8) still
+  merges. Same-class boxes are compared identically in both NMS modes, so
+  reverting to per-class would NOT free clusters — only resurrect duplicates.
+  The NMS-free A/B baselines (YOLO26, RT-DETR) ignore these args. No further knobs.
 - Method B is a **tie-breaker, not a classifier**: it may only ever reorder an
   ambiguous plastic-vs-glass top-2; never let ψ overrule a clear ViT verdict or
   touch other materials.
@@ -239,7 +245,7 @@ Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
 | Processing layer (b) | **Method B** — `cv2.Laplacian` variance + `cv2.Canny` density → ψ; refs 500 / 0.10; tie-break margin 0.15 | Classical physics separates transparent glass vs plastic with zero retraining; tie-breaker only, fully audited in the payload. |
 | Stage 2 classifier | **`edwinpalegre/ee8225-group4-vit-trashnet-enhanced`** via HF `transformers` image-classification pipeline | Supervised ViT-B/16, TrashNet-enhanced, 98.17% val acc, Apache-2.0; native 7 labels (verified) map 1:1 onto the taxonomy. |
 | Label mapping | model `trash` → system `general rubbish`; all other labels identity | `MODEL_LABEL_TO_MATERIAL` in classification_service; tests enforce full coverage. |
-| Stage 1 tuning | `conf=0.15` default (per-request override) + **class-agnostic NMS** (`agnostic_nms=True, iou=0.45` — `_NMS_IOU` in `detection_service.py`) | Recall-first (Stage 2 carries per-item certainty); per-class default NMS kept duplicate cross-class boxes on one object — agnostic suppression guarantees one box per physical object (the NMS-free A/B baselines ignore the args). |
+| Stage 1 tuning | `conf=0.15` default (per-request override) + **class-agnostic NMS** (`agnostic_nms=True, iou=0.60` — `_NMS_IOU` in `detection_service.py`) | Recall-first (Stage 2 carries per-item certainty); agnostic suppression kills duplicate cross-class boxes on one object, and the 0.60 IoU (raised from 0.45, 2026-07-14) keeps tightly packed same-class clusters as individual boxes (the NMS-free A/B baselines ignore the args). |
 | Carbon scaling | `estimated_carbon_kg = base x (box_area_px / γ)`, **γ = 8000** (recalibrated from 5000 for rectangular over-coverage, fill factor ~0.6) | Box area as volume/mass proxy until Step 5's real weights. |
 | Carbon provider | **Climatiq** (live, Step 5) with the **dummy per-kg coefficients** in `carbon_service.py` as the ever-present blank-key fallback | Dual-stage UX: blind local proxy at upload, audited live factors on user verification; the app never requires a key. |
 | Disposal-path matrix (DMM) | `carbon_service.DISPOSAL_METHOD_FACTORS` — 7 materials × 3 routes of NET kg CO2e/kg code constants, the **GB-anchored baseline** (0.207 kgCO2e/kWh); **credits are NEGATIVE** (offsets). v3.8 re-derives per-country factors at runtime via the Grid-Intensity Proxy Scaling Engine (one cached grid probe, never-raises fallback ladder) | Deterministic, offline-capable, auditable (scaled + base factor AND the grid datum echoed in the payload); the ranking must never block on the network — live regional WASTE factors stay Module 2's audit concern. |
@@ -335,9 +341,11 @@ archived in §11 after failing empirically). What matters:
   even though the detector's labels *look* like materials, they are coarse,
   unvalidated, and NOT the verdict.
 - The predict call passes `conf` plus class-agnostic suppression
-  (`agnostic_nms=True, iou=0.45`): the 5 coarse classes overlap on real objects
+  (`agnostic_nms=True, iou=0.60`): the 5 coarse classes overlap on real objects
   (one item can fire as both "Paper" and "Waste"), and per-class default NMS
-  kept both boxes — agnostic NMS collapses them to one box per physical object.
+  kept both boxes — agnostic NMS collapses them to one box per physical object,
+  while the 0.60 threshold lets tightly clustered same-class items keep their
+  individual boxes.
 
 ### Stage 2 — system taxonomy (`classification_service.MATERIAL_CLASSES`)
 
@@ -401,8 +409,9 @@ Rules:
     import services freely.
   - Stage-1 threshold: `CONFIDENCE_THRESHOLD` (default **0.15**, recall-first);
     per-request `conf` form-field override (clamped to [0.01, 1.0]). The predict
-    call adds class-agnostic NMS (`agnostic_nms=True, iou=0.45`) — the
-    duplicate-box guard. Device from `INFERENCE_DEVICE` for both towers.
+    call adds class-agnostic NMS (`agnostic_nms=True, iou=0.60`) — the
+    duplicate-box guard, thresholded to preserve tight same-class clusters.
+    Device from `INFERENCE_DEVICE` for both towers.
   - All failures surface as `ApiError`; empty detections are a valid result.
 - **Hardware:** CPU works (well under a second per image for the nano detector);
   GTX 1650 handles both towers' *inference* trivially (v8-N ~0.05 GB + ViT-B/16
@@ -672,7 +681,7 @@ LLM_API_URL=https://api.groq.com/openai/v1/chat/completions
 MODEL_PATH=models/yolov8n-waste-det.pt   # Stage 1 specialist detector (auto-fetched if missing)
                                           # A/B: models/yolov8m-seg-trash.pt | yolo26x-seg.pt
 VIT_MODEL_NAME=edwinpalegre/ee8225-group4-vit-trashnet-enhanced   # Stage 2 (HF model id)
-CONFIDENCE_THRESHOLD=0.15         # Stage 1, recall-first (code also fixes agnostic NMS, iou=0.45)
+CONFIDENCE_THRESHOLD=0.15         # Stage 1, recall-first (code also fixes agnostic NMS, iou=0.60)
 INFERENCE_DEVICE=0                # BOTH towers: "cpu" or CUDA index ("0")
 DATABASE_URL=sqlite:///waste_app.db
 ```
@@ -872,11 +881,18 @@ retraining), whereas CLIP's was editable text.
   LOOK like materials (Glass/Metal/Paper/Plastic/Waste), never display them as the
   verdict or branch on them.
 - Stage-1 suppression is **class-agnostic by design**: the predict call fixes
-  `agnostic_nms=True, iou=0.45` (`_NMS_IOU` in `detection_service.py`) — per-class
+  `agnostic_nms=True, iou=0.60` (`_NMS_IOU` in `detection_service.py`) — per-class
   default NMS let one object survive as overlapping "Paper" + "Waste" boxes that
-  the ViT then named identically (duplicate frames). Never remove these args or
-  revert to per-class suppression; the NMS-free A/B baselines (YOLO26, RT-DETR)
-  simply ignore them. Add no other NMS knobs (`max_det`, etc.).
+  the ViT then named identically (duplicate frames). The IoU was raised
+  0.45→0.60 (2026-07-14) after tightly packed same-class clusters (three
+  bottles) merged into one macro box — and note: same-class boxes are compared
+  IDENTICALLY in per-class and agnostic modes, so flipping agnostic off can
+  never fix cluster merging; it only resurrects the duplicates. Never remove
+  these args or revert to per-class suppression; the NMS-free A/B baselines
+  (YOLO26, RT-DETR) simply ignore them. Add no other NMS knobs (`max_det`,
+  etc.). If clustered sub-boxes are still missing at iou=0.60, suspect the
+  CONF gate (0.15) instead — weak individual fires die there, testable via
+  the /api/predict `conf` form-field override before touching NMS again.
 - Method B is a TIE-BREAKER only: it may reorder an ambiguous plastic-vs-glass top-2
   (gap < `PLASTICITY_TIEBREAK_MARGIN` = 0.15) and nothing else. Its constants
   (`_LAPLACIAN_REF`, `_EDGE_DENSITY_REF`, margin) are code constants in

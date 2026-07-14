@@ -172,7 +172,10 @@ def test_predict_runs_class_agnostic_suppression(app, monkeypatch, tmp_path):
         ds.analyze_waste_pipeline(_real_image(tmp_path))
 
     assert captured["agnostic_nms"] is True
-    assert captured["iou"] == ds._NMS_IOU == 0.45
+    # 0.60 (raised from 0.45): merge only above 60% IoU so tightly packed
+    # same-class clusters keep their individual boxes; a genuine double-fire
+    # on one object (IoU >= ~0.8) still collapses.
+    assert captured["iou"] == ds._NMS_IOU == 0.60
     assert captured["conf"] == expected_conf
 
 
