@@ -826,6 +826,7 @@ const state = {
   auditMeta: { provider: null, total: 0 },
   recs: {},                 // id -> {paths: [3 ranked], provider}
   process: {},              // id -> selected method key
+  specTab: {},              // id -> "specs" | "env" (progressive-disclosure sub-tab)
   activeId: null,
   minConf: 0.5,             // confidence pill threshold — client-side VIEW filter
   country: "MY",
@@ -1059,7 +1060,7 @@ async function analyze(file) {
     state.imgW = data.image.width;
     state.imgH = data.image.height;
     state.weights = {}; state.edited = new Set();
-    state.audit = {}; state.recs = {}; state.process = {};
+    state.audit = {}; state.recs = {}; state.process = {}; state.specTab = {};
     state.auditMeta = { provider: "local (γ proxy)", total: null };
     state.activeId = data.items.length
       ? data.items.reduce((a, b) => (b.confidence > a.confidence ? b : a)).id : null;
@@ -1135,7 +1136,7 @@ function resetWorkspace() {
     if (state.imgUrl) URL.revokeObjectURL(state.imgUrl);
     state.img = null; state.imgUrl = null; state.imgW = 0; state.imgH = 0;
     state.items = []; state.weights = {}; state.edited = new Set();
-    state.audit = {}; state.recs = {}; state.process = {};
+    state.audit = {}; state.recs = {}; state.process = {}; state.specTab = {};
     state.auditMeta = { provider: null, total: null };
     state.activeId = null; state.reveal = 1;
 
@@ -1415,6 +1416,80 @@ function tabsHtml(it) {
     </div>`;
 }
 
+// Carbon Equivalence Contextualizer constants (client-side, 0-lag).
+const EQUIV = { phonesPerKg: 121.5, treeMonthsPerKg: 0.5 };
+// Rank → progress-bar colour (banned paths carry no rank → neutral slate).
+const ENV_BAR_CLS = {
+  1: "bg-emerald-500 shadow-sm shadow-emerald-100",
+  2: "bg-amber-500 shadow-sm shadow-amber-100",
+  3: "bg-rose-500 shadow-sm shadow-rose-100",
+};
+
+// The DMM pathway currently in focus — the selected applicable path, else the
+// first applicable, else whatever exists (mirrors tabsHtml's binding exactly).
+function activeDmmPath(rec, id) {
+  const sel = state.process[id];
+  return rec.recommendations.find(p => p.method === sel && p.is_applicable)
+    || rec.recommendations.find(p => p.is_applicable)
+    || rec.recommendations[0];
+}
+
+// Environmental Impact sub-panel: a horizontal emissions-breakdown bar chart
+// (magnitude-scaled, rank-coloured) + the Carbon Equivalence Contextualizer
+// keyed off the ACTIVE pathway. Carbon can be negative (offsets), so bars are
+// sized by |value| against the largest |value| — a signed value still prints.
+function envPanelHtml(it, rec) {
+  if (!rec) {
+    return `<p class="text-[11px] text-slate-400 px-1">Environmental breakdown loads with the decision simulation…</p>`;
+  }
+  const paths = rec.recommendations;
+  const maxAbs = Math.max(...paths.map(p => Math.abs(p.carbon_impact_kg)), 1e-4);
+  const rows = paths.map(p => {
+    const pct = Math.max(3, Math.abs(p.carbon_impact_kg) / maxAbs * 100);
+    const barCls = p.is_applicable ? (ENV_BAR_CLS[p.rank] || "bg-teal-500") : "bg-slate-300";
+    const label = TAB_LABEL[p.method] || p.method;
+    return `
+      <div class="flex items-center gap-2.5">
+        <span class="w-20 shrink-0 text-[11px] font-medium truncate ${p.is_applicable ? "text-slate-600" : "text-slate-400 line-through"}">${label}</span>
+        <div class="flex-1 min-w-0 h-2 rounded-full bg-slate-100 overflow-hidden">
+          <div class="env-bar h-2 rounded-full transition-all duration-500 ease-out ${barCls}" data-target="${pct.toFixed(1)}" style="width: ${pct.toFixed(1)}%"></div>
+        </div>
+        <span class="w-[4.75rem] shrink-0 text-right text-[11px] font-semibold tabular-nums text-slate-700 whitespace-nowrap">${p.carbon_impact_kg.toFixed(3)}<span class="ml-0.5 text-[8px] text-slate-400 font-medium">kg</span></span>
+      </div>`;
+  }).join("");
+
+  // Equivalence off the ACTIVE pathway's magnitude (offsets count as impact).
+  const act = activeDmmPath(rec, it.id);
+  const absC = Math.abs(act.carbon_impact_kg);
+  const phones = Math.round(absC * EQUIV.phonesPerKg);
+  const treeMonths = (absC * EQUIV.treeMonthsPerKg).toFixed(1);
+
+  return `
+    <div class="flex flex-col gap-1.5">
+      <p class="text-[10px] font-bold tracking-wider text-slate-400 uppercase mb-1">📊 Emissions by pathway · ${esc(countryName(state.country))} grid</p>
+      ${rows}
+    </div>
+    <div>
+      <span class="text-[10px] font-bold tracking-wider text-slate-400 uppercase mb-1 block">🌍 Local Carbon Impact Equivalent</span>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2 p-3 bg-slate-50 border border-slate-100/70 rounded-xl">
+        <div class="flex items-center gap-2.5 rounded-lg bg-white border border-slate-100 px-3 py-2">
+          <span class="text-lg leading-none select-none">📱</span>
+          <div class="min-w-0">
+            <p class="text-sm font-bold text-slate-800 tabular-nums leading-tight">${phones.toLocaleString()}</p>
+            <p class="text-[10px] text-slate-500 leading-tight">Smartphone Charges</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-2.5 rounded-lg bg-white border border-slate-100 px-3 py-2">
+          <span class="text-lg leading-none select-none">🌳</span>
+          <div class="min-w-0">
+            <p class="text-sm font-bold text-slate-800 tabular-nums leading-tight">${treeMonths}</p>
+            <p class="text-[10px] text-slate-500 leading-tight">Months of Tree Absorption</p>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
 function cardHtml(it) {
   const m = meta(it.class_name);
   const audit = state.audit[it.id];
@@ -1429,6 +1504,7 @@ function cardHtml(it) {
     ? `Factor ${audit.carbon_factor_kg_per_kg.toFixed(4)} kg/kg · ${audit.source} · ${audit.weight_source.replaceAll("_", " ")}`
     : `Stage-A proxy · base × area ÷ γ`;
   const volume = weight > 0 ? Math.round(weight / m.density * 1000) : 0;
+  const specTab = state.specTab[it.id] || "specs";   // sub-tab client memory
 
   return `
   <article data-id="${it.id}" class="item-card rounded-2xl border border-zinc-300 bg-zinc-100 shadow-sm shadow-zinc-900/[0.04] cursor-pointer transition-all duration-300 hover:border-zinc-400 gsap-card gsap-stagger-item ${expanded ? "active-item p-6" : "py-2.5 px-6"}">
@@ -1450,7 +1526,14 @@ function cardHtml(it) {
           </div>
         </div>
         ${expanded ? `
-        <div class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2.5 expand-body">
+        <div class="mt-4">
+          <!-- Progressive-disclosure sub-tab switcher (client-side, 0-lag) -->
+          <div class="flex flex-row bg-slate-100/80 p-0.5 rounded-lg text-xs w-full max-w-[280px] mb-3 select-none">
+            <button data-spectab="specs" class="spec-tab flex-1 rounded-md py-1.5 text-center font-semibold transition-all duration-200 ${specTab === "specs" ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500 hover:text-zinc-700"}">⚙️ Specs</button>
+            <button data-spectab="env" class="spec-tab flex-1 rounded-md py-1.5 text-center font-semibold transition-all duration-200 ${specTab === "env" ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500 hover:text-zinc-700"}">📊 Environmental Impact</button>
+          </div>
+          <div id="panel-specs" class="${specTab === "env" ? "hidden opacity-0" : "opacity-100"} transition-all duration-300 flex flex-col space-y-2">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 expand-body">
           <label class="flex flex-col md:flex-col lg:flex-row items-start md:items-start lg:items-center justify-between gap-1 md:gap-1 lg:gap-2 rounded-lg border border-zinc-200/80 bg-zinc-50 px-2.5 md:px-2.5 lg:px-3 py-2">
             <span class="font-mono-d text-[8px] md:text-[8px] lg:text-[9px] tracking-tight lg:tracking-[0.18em] uppercase text-zinc-400 shrink-0">Weight${state.edited.has(it.id) ? " · verified" : " · proxy"}</span>
             <span class="flex items-center gap-1.5 w-full">
@@ -1469,6 +1552,11 @@ function cardHtml(it) {
           <div class="flex flex-col md:flex-col lg:flex-row items-start md:items-start lg:items-center justify-between gap-1 md:gap-1 lg:gap-2 rounded-lg border border-zinc-200/80 bg-zinc-50 px-2.5 md:px-2.5 lg:px-3 py-2">
             <span class="font-mono-d text-[8px] md:text-[8px] lg:text-[9px] tracking-tight lg:tracking-[0.18em] uppercase text-zinc-400 shrink-0">Decomposes</span>
             <span class="text-[13px] md:text-[13px] lg:text-sm font-semibold text-zinc-500 tracking-tight whitespace-nowrap">${m.decompose}</span>
+          </div>
+            </div>
+          </div>
+          <div id="panel-environmental" class="${specTab === "env" ? "opacity-100" : "hidden opacity-0"} transition-all duration-300 flex flex-col space-y-3">
+            ${envPanelHtml(it, state.recs[it.id])}
           </div>
         </div>
         ${tabsHtml(it)}` : ""}
@@ -1513,6 +1601,12 @@ function renderItems() {
         if (panel) gsap.fromTo(panel, { y: 8, opacity: 0 }, { y: 0, opacity: 1, duration: 0.35 });
       });
     });
+    card.querySelectorAll(".spec-tab").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        switchSpecTab(card, id, btn.dataset.spectab);
+      });
+    });
   });
 
   applyConfFilter();   // fresh DOM — re-apply the confidence view filter
@@ -1544,6 +1638,46 @@ let refreshTimer = null;
 function scheduleRefresh() {
   clearTimeout(refreshTimer);
   refreshTimer = setTimeout(runGridRefresh, 650);
+}
+
+// Grow the environmental chart bars from 0 → target (the reveal animation).
+function animateEnvBars(card) {
+  card.querySelectorAll(".env-bar").forEach(bar => {
+    const target = bar.dataset.target;
+    bar.style.width = "0%";
+    requestAnimationFrame(() => { bar.style.width = target + "%"; });
+  });
+}
+
+// Progressive-disclosure sub-tab switch — pure DOM, ZERO re-render (0-lag).
+// The choice is mirrored into state.specTab so a later renderItems() (weight
+// edit / country flip / pathway change) rebuilds the card on the same tab.
+// Outgoing panel hides instantly (no stacking / height jump); incoming
+// cross-fades in; the chart bars re-grow when Environmental Impact opens.
+function switchSpecTab(card, id, tab) {
+  if ((state.specTab[id] || "specs") === tab) return;
+  state.specTab[id] = tab;
+  const specs = card.querySelector("#panel-specs");
+  const env = card.querySelector("#panel-environmental");
+  if (!specs || !env) return;
+  const show = tab === "env" ? env : specs;
+  const hide = tab === "env" ? specs : env;
+
+  card.querySelectorAll(".spec-tab").forEach(b => {
+    const on = b.dataset.spectab === tab;
+    b.classList.toggle("bg-white", on);
+    b.classList.toggle("text-zinc-900", on);
+    b.classList.toggle("shadow-sm", on);
+    b.classList.toggle("text-zinc-500", !on);
+  });
+
+  hide.classList.add("hidden", "opacity-0");   // instant hide — no layout stack
+  show.classList.remove("hidden");
+  requestAnimationFrame(() => {
+    show.classList.remove("opacity-0");
+    show.classList.add("opacity-100");
+    if (tab === "env") animateEnvBars(card);
+  });
 }
 
 function setActive(id) {

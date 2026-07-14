@@ -649,6 +649,14 @@ Rules:
     weight edits are debounced (650 ms) into re-audits; the card label
     flips `proxy → verified`, and the factor line shows
     `factor · source · weight_source`.
+  - **Progressive-disclosure sub-tabs (per expanded card):** a segmented
+    ⚙️ Specs / 📊 Environmental Impact micro-switch (client-side memory in
+    `state.specTab[id]`, pure-DOM cross-fade, ZERO re-render) swaps the 4
+    spec cells for a magnitude-scaled, rank-coloured horizontal
+    emissions-breakdown bar chart (3 pathways) + the **Carbon Equivalence
+    Contextualizer** (active pathway |CO2e| → smartphone charges ×121.5 /
+    tree-absorption months ×0.5); both recompute on pathway-tab and country
+    switches.
   - **DMM panel per card:** `POST /api/recommend` fills the 3 ranked
     process tabs (rank-numbered labels, Optimal/Acceptable/Warning chips,
     per-path CO2e) + the child-simple verdict and pros/cons + a static
