@@ -573,6 +573,17 @@
 
         <!-- Drop-zone modal card -->
         <div id="drop-overlay" class="absolute inset-0 z-10 flex items-center justify-center" style="background: linear-gradient(360deg, rgb(255, 255, 255), rgba(20, 184, 166, 0.35));">
+          <!-- Center-focus viewfinder reticle — standby framing guide. Lives
+               inside the drop overlay, so it fades out with the same GSAP
+               ease the moment a file stream / camera capture starts, and
+               fades back in on NEW SCAN. pointer-events-none: drag-drop and
+               clicks pass straight through. -->
+          <div id="viewfinder" class="absolute inset-0 pointer-events-none transition-opacity duration-500" aria-hidden="true">
+            <div class="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[min(26rem,72vw)] h-[min(26rem,72vw)] rounded-full border border-dashed border-teal-600/25"></div>
+            <div class="absolute top-1/2 left-8 right-8 h-px -translate-y-1/2 bg-gradient-to-r from-transparent via-teal-600/20 to-transparent"></div>
+            <div class="absolute left-1/2 top-8 bottom-8 w-px -translate-x-1/2 bg-gradient-to-b from-transparent via-teal-600/20 to-transparent"></div>
+            <p class="absolute bottom-14 left-1/2 -translate-x-1/2 w-max max-w-[90%] rounded-full border border-zinc-200/70 bg-white/80 backdrop-blur-md px-4 py-1.5 text-center text-[11px] leading-relaxed text-zinc-500 shadow-sm">💡 Pro-Tip: Center the primary item and ensure a clean, isolated background for 100% detection precision.</p>
+          </div>
           <input id="file-input" type="file" accept="image/*" class="hidden">
           <span id="drop-card" class="flex flex-col items-center gap-4 md:gap-3 lg:gap-4 rounded-2xl border border-zinc-300 bg-zinc-100 w-fit max-w-[85%] px-10 md:px-8 lg:px-16 py-10 md:py-8 lg:py-12 shadow-md shadow-zinc-900/[0.07] transition-colors duration-300">
             <span class="w-14 h-14 md:w-10 md:h-10 lg:w-14 lg:h-14 rounded-full bg-teal-50 border border-teal-200/80 flex items-center justify-center text-teal-500 text-2xl md:text-lg lg:text-2xl font-light">↑</span>
@@ -645,7 +656,19 @@
               <p class="text-sm font-semibold text-zinc-900">Emission factor profile</p>
               <p class="mt-1 text-xs font-normal text-zinc-500 whitespace-nowrap tracking-tight" style="overflow: hidden">Grid intensity <span id="grid-intensity" class="font-mono-d text-zinc-900 font-medium">—</span> kgCO₂/kWh · <span id="geo-mode-lower">auto-detected region</span></p>
             </div>
-            <select id="country-select" class="w-full md:w-full lg:w-auto lg:shrink-0 lg:max-w-[220px] rounded-lg border border-zinc-200/80 bg-white text-zinc-900 text-sm font-medium px-3.5 py-2 outline-none focus:border-teal-500/60 focus:ring-2 focus:ring-teal-500/10 cursor-pointer"></select>
+            <!-- Custom country dropdown (replaces the native <select>): the
+                 hidden input keeps the id="country-select" contract so the
+                 backend country-code tracking flow is untouched. -->
+            <div id="country-dd" class="relative w-full md:w-full lg:w-auto lg:shrink-0 lg:min-w-[200px] lg:max-w-[240px]">
+              <input type="hidden" id="country-select" value="MY">
+              <button type="button" id="country-trigger" aria-haspopup="listbox" aria-expanded="false"
+                class="w-full flex items-center justify-between gap-2.5 rounded-xl border border-teal-200 bg-white px-3.5 py-2 text-sm font-medium text-zinc-900 outline-none transition-all duration-200 hover:border-teal-300 focus:ring-2 focus:ring-teal-400 cursor-pointer">
+                <span id="country-trigger-label" class="truncate">MY — Malaysia</span>
+                <svg id="country-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" class="shrink-0 text-zinc-400 transition-transform duration-200"><path d="m6 9 6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+              <div id="country-menu" role="listbox" aria-label="Emission factor region"
+                class="hidden absolute z-50 mt-2 w-full min-w-[200px] rounded-xl border border-zinc-200/80 bg-white py-1.5 shadow-xl shadow-zinc-900/10 max-h-64 overflow-y-auto origin-top transition duration-150 ease-out opacity-0 scale-95"></div>
+            </div>
           </div>
         </article>
 
@@ -818,18 +841,53 @@ function applyConfFilter() {
 
 /* ------------------------------ country / geo ------------------------------ */
 
+// Custom dropdown (replaces the native <select>): renders the option list,
+// mirrors the selection into the hidden #country-select input (the backend
+// contract), and highlights the active row. Safe to call repeatedly —
+// geolocate() re-runs it when a new country joins the list.
 function buildCountrySelect() {
-  const sel = $("country-select");
-  sel.innerHTML = COUNTRIES.map(c =>
-    `<option value="${c.code}">${c.code} — ${esc(c.name)}</option>`).join("");
-  sel.value = state.country;
-  sel.addEventListener("change", () => {
-    state.country = sel.value;
-    state.geoMode = "OVERRIDE";
-    syncGeoUi();
-    gsap.fromTo("#geo-badge", { scale: 0.92 }, { scale: 1, duration: 0.4, ease: "back.out(2)" });
-    if (state.items.length) { refreshImpact(); refreshRecommendations(); }
+  const menu = $("country-menu");
+  menu.innerHTML = COUNTRIES.map(c => `
+    <button type="button" role="option" data-code="${c.code}"
+      aria-selected="${c.code === state.country}"
+      class="country-option w-full flex items-center justify-between gap-2 px-3.5 py-2 text-left text-sm transition-colors duration-150 hover:bg-teal-50 ${c.code === state.country ? "bg-teal-50/60 text-teal-700 font-semibold" : "text-zinc-700"}">
+      <span class="truncate">${c.code} — ${esc(c.name)}</span>
+      ${c.code === state.country ? '<span class="shrink-0 text-teal-500 text-xs">✓</span>' : ""}
+    </button>`).join("");
+  $("country-select").value = state.country;                   // hidden input sync
+  $("country-trigger-label").textContent =
+    `${state.country} — ${countryName(state.country)}`;
+  menu.querySelectorAll(".country-option").forEach(btn => {
+    btn.addEventListener("click", () => {
+      closeCountryMenu();
+      if (btn.dataset.code === state.country) return;
+      state.country = btn.dataset.code;
+      state.geoMode = "OVERRIDE";
+      buildCountrySelect();          // re-render checkmark + hidden input
+      syncGeoUi();
+      gsap.fromTo("#geo-badge", { scale: 0.92 }, { scale: 1, duration: 0.4, ease: "back.out(2)" });
+      if (state.items.length) { refreshImpact(); refreshRecommendations(); }
+    });
   });
+}
+
+let countryMenuOpen = false;
+function openCountryMenu() {
+  const menu = $("country-menu");
+  menu.classList.remove("hidden");
+  requestAnimationFrame(() => menu.classList.remove("opacity-0", "scale-95"));
+  $("country-trigger").setAttribute("aria-expanded", "true");
+  $("country-chevron").style.transform = "rotate(180deg)";
+  countryMenuOpen = true;
+}
+function closeCountryMenu() {
+  if (!countryMenuOpen) return;
+  const menu = $("country-menu");
+  menu.classList.add("opacity-0", "scale-95");
+  setTimeout(() => menu.classList.add("hidden"), 150);   // let the ease finish
+  $("country-trigger").setAttribute("aria-expanded", "false");
+  $("country-chevron").style.transform = "";
+  countryMenuOpen = false;
 }
 
 function countryName(code) {
@@ -857,10 +915,9 @@ async function geolocate() {
     if (/^[A-Z]{2}$/.test(code)) {
       if (!COUNTRIES.some(c => c.code === code)) {
         COUNTRIES.unshift({ code, name: countryName(code), grid: NaN });
-        buildCountrySelect();
       }
       state.country = code;
-      $("country-select").value = code;
+      buildCountrySelect();   // re-render trigger label + hidden input + ✓
     }
   } catch { /* offline / blocked — keep the MY default silently */ }
   state.geoMode = "AUTO-GEO";
@@ -1261,6 +1318,10 @@ function renderItems() {
   const list = $("items-list");
   if (!state.items.length) {
     list.innerHTML = `<p class="text-xs text-zinc-400 px-1">Run a detection to populate the item inspector — every card links 1:1 to its bounding box.</p>`;
+    // Keep the footer pill honest on the empty state too: without this the
+    // early return skipped applyConfFilter and NEW SCAN left a stale
+    // "3 objects (+2 filtered)" count next to "upload an image to begin".
+    applyConfFilter();
     return;
   }
   list.innerHTML = state.items.map(cardHtml).join("");
@@ -1441,6 +1502,17 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   buildCountrySelect();
+  // Dropdown shell wiring (bound ONCE — rebuilds only replace the options).
+  $("country-trigger").addEventListener("click", (e) => {
+    e.stopPropagation();
+    countryMenuOpen ? closeCountryMenu() : openCountryMenu();
+  });
+  document.addEventListener("click", (e) => {
+    if (countryMenuOpen && !$("country-dd").contains(e.target)) closeCountryMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeCountryMenu();
+  });
   syncGeoUi();
   wireUpload();
   geolocate();

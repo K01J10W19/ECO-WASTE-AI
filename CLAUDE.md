@@ -611,7 +611,11 @@ Rules:
   fonts self-hosted from `app/static/assets/`; no template runtime):
   - **Upload:** drag-drop, file picker, or live **camera capture**
     (getUserMedia → canvas → File) → `POST /api/predict`; the user's own
-    pixels render immediately while the towers run.
+    pixels render immediately while the towers run. The standby drop zone
+    carries a **center-focus viewfinder reticle** (dashed focus circle +
+    gradient crosshairs + framing pro-tip caption, pointer-events-none)
+    that fades out with the overlay when a scan starts and returns on
+    NEW SCAN.
   - **Detection canvas:** letterboxed contain-fit with blueprint grid;
     bounding boxes with corner ticks + JetBrains-Mono label chips, coloured
     by per-item CO2e tier (teal / amber ≥0.12 kg / rose ≥0.24 kg); GSAP
@@ -635,9 +639,14 @@ Rules:
     Optimal before the panel re-renders.
   - **Telemetry:** GSAP-tweened total CO2e counter, petrol-km equivalence,
     provider label, item/mass/recyclable-share stats, ELEVATED/LOW impact
-    chip; **geo badge + country select** pre-populated by an IP-geolocation
-    lookup (ipapi.co, 4 s timeout, silent MY fallback) — manual changes flip
-    AUTO-GEO → OVERRIDE and re-run audit + recommendations.
+    chip; **geo badge + country selector** pre-populated by an
+    IP-geolocation lookup (ipapi.co, 4 s timeout, silent MY fallback) —
+    manual changes flip AUTO-GEO → OVERRIDE and re-run audit +
+    recommendations. The selector is a **custom Tailwind dropdown** (the
+    native `<select>` is replaced): rounded-xl teal-ring trigger, z-50
+    floating option list with ease/scale transition, hover:bg-teal-50 rows
+    + ✓ active state, outside-click/Escape close; a hidden input keeps the
+    `country-select` id so the backend country-code flow is untouched.
   - **Resilience:** every fetch failure lands in a GSAP toast + status pill;
     the numbers degrade to the Stage-A proxy, never a blank screen. The
     audit + recommendation refreshers are **SINGLE-FLIGHT** (AbortController
