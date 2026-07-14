@@ -506,6 +506,41 @@
     50% { opacity: 0.65; box-shadow: 0 0 0 5px rgba(20,184,166,0); }
   }
   .pulse-dot { animation: pulse-dot 2.2s ease-in-out infinite; }
+
+  /* ===== Async loading states (pure CSS — a removed class always reverts,
+     so the UI can never wedge in a perpetual spinner) ===== */
+  @keyframes cq-spin { to { transform: rotate(360deg); } }
+  @keyframes cq-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+  .cq-ring {
+    border-radius: 9999px; border-style: solid;
+    border-color: rgba(20,184,166,0.22); border-top-color: #14b8a6;
+    animation: cq-spin 0.7s linear infinite;
+  }
+  /* Issue 1 — heavy AI scan: left canvas mask + right telemetry skeleton.
+     Driven by body.is-scanning-active (set at analyze() start, cleared in
+     its finally() — one flag, one clear point). */
+  #scan-overlay {
+    opacity: 0; visibility: hidden;
+    transition: opacity 0.4s ease, visibility 0.4s ease;
+  }
+  body.is-scanning-active #scan-overlay { opacity: 1; visibility: visible; }
+  .cq-scan-text { animation: cq-pulse 1.5s ease-in-out infinite; }
+  body.is-scanning-active .js-skel,
+  body.is-scanning-active .js-skel > * {
+    color: transparent !important;
+    background-color: #e2e8f0;           /* slate-200 skeleton bar */
+    border-radius: 0.5rem;
+    box-shadow: none !important;
+    animation: cq-pulse 1.4s ease-in-out infinite;
+  }
+  /* Issue 2 — micro grid-recalculation glass masks (footprint + items).
+     Driven by body.is-recalculating-grid; fade only, no layout shift. */
+  .recalc-mask {
+    opacity: 0; visibility: hidden;
+    transition: opacity 0.2s ease, visibility 0.2s ease;
+  }
+  body.is-recalculating-grid .recalc-mask { opacity: 1; visibility: visible; }
+
   /* Apple-style confidence pill slider (browser-native range, restyled) */
   #conf-slider {
     -webkit-appearance: none; appearance: none;
@@ -606,6 +641,15 @@
           </span>
         </div>
 
+        <!-- Heavy AI scan mask (Issue 1) — covers the canvas while the
+             dual-tower + carbon pipeline runs; pointer-events-none, purely
+             visual (state.busy guards re-entry). Fades via CSS on the
+             is-scanning-active body class. -->
+        <div id="scan-overlay" class="absolute inset-0 z-40 flex flex-col items-center justify-center gap-5 pointer-events-none" style="background: linear-gradient(360deg, rgba(255,255,255,0.92), rgba(20,184,166,0.30)); backdrop-filter: blur(2px);" aria-hidden="true">
+          <div class="cq-ring w-12 h-12" style="border-width: 3px"></div>
+          <p class="cq-scan-text font-mono-d text-[12px] tracking-[0.16em] uppercase text-teal-700 font-semibold text-center px-6">🤖 CarbIQ Engines Analyzing Matrix…</p>
+        </div>
+
         <!-- Camera overlay -->
         <div id="camera-overlay" class="hidden absolute inset-0 z-30 flex-col items-center justify-center gap-4 bg-zinc-900/80 backdrop-blur-sm">
           <video id="camera-video" autoplay playsinline muted class="max-w-[80%] max-h-[70%] rounded-xl border border-zinc-700 shadow-lg"></video>
@@ -624,29 +668,33 @@
       <div class="p-8 flex flex-col gap-6">
 
         <!-- MODULE A · Total estimated footprint -->
-        <article class="rounded-2xl border border-zinc-300 bg-zinc-100 p-7 shadow-sm shadow-zinc-900/[0.04] gsap-telemetry">
+        <article class="relative overflow-hidden rounded-2xl border border-zinc-300 bg-zinc-100 p-7 shadow-sm shadow-zinc-900/[0.04] gsap-telemetry">
+          <!-- Micro grid-recalculation glass mask (Issue 2) -->
+          <div class="recalc-mask absolute inset-0 z-30 flex items-center justify-center bg-white/40 backdrop-blur-[1.5px]" aria-hidden="true">
+            <div class="cq-ring w-7 h-7" style="border-width: 2px"></div>
+          </div>
           <div class="flex items-start justify-between">
             <p class="font-mono-d text-[10px] tracking-[0.2em] uppercase text-zinc-400">Total estimated footprint</p>
             <span id="status-chip" class="rounded-full border px-2.5 py-1 text-[10px] font-mono-d tracking-wider uppercase text-center whitespace-nowrap shrink-0 flex items-center justify-center border-teal-200/80 bg-teal-50 text-teal-700">AWAITING SCAN</span>
           </div>
           <div class="mt-4 flex items-baseline gap-3">
-            <span id="carbon-number" class="text-6xl font-extrabold tracking-tight text-zinc-900 tabular-nums">0.000</span>
+            <span id="carbon-number" class="js-skel text-6xl font-extrabold tracking-tight text-zinc-900 tabular-nums">0.000</span>
             <span class="text-sm font-semibold text-teal-600">kg CO₂e</span>
           </div>
-          <p class="mt-2.5 text-xs text-zinc-500">≈ <span class="text-zinc-900 font-semibold"><span id="km-equiv">0.0</span> km</span> driven in a petrol car · factors: <span id="provider-label" class="text-zinc-900 font-semibold">local (γ proxy)</span></p>
+          <p class="mt-2.5 text-xs text-zinc-500">≈ <span class="text-zinc-900 font-semibold"><span id="km-equiv" class="js-skel">0.0</span> km</span> driven in a petrol car · factors: <span id="provider-label" class="text-zinc-900 font-semibold">local (γ proxy)</span></p>
 
           <div class="mt-6 grid grid-cols-3 gap-3">
             <div class="rounded-xl border border-zinc-200/80 bg-zinc-50 px-4 py-3">
               <p class="font-mono-d text-[9px] tracking-[0.18em] uppercase text-zinc-400">Items</p>
-              <p id="stat-items" class="mt-1 text-lg font-bold text-zinc-900 tabular-nums">0</p>
+              <p id="stat-items" class="js-skel mt-1 text-lg font-bold text-zinc-900 tabular-nums">0</p>
             </div>
             <div class="rounded-xl border border-zinc-200/80 bg-zinc-50 px-4 py-3">
               <p class="font-mono-d text-[9px] tracking-[0.18em] uppercase text-zinc-400">Mass</p>
-              <p class="mt-1 text-lg font-bold text-zinc-900 tabular-nums"><span id="stat-mass">0.000</span><span class="text-[11px] font-medium text-zinc-400 ml-1">kg</span></p>
+              <p class="mt-1 text-lg font-bold text-zinc-900 tabular-nums"><span id="stat-mass" class="js-skel">0.000</span><span class="text-[11px] font-medium text-zinc-400 ml-1">kg</span></p>
             </div>
             <div class="rounded-xl border border-zinc-200/80 bg-zinc-50 px-4 py-3">
               <p class="font-mono-d text-[9px] tracking-[0.18em] uppercase text-zinc-400">Recyclable</p>
-              <p class="mt-1 text-lg font-bold text-teal-600 tabular-nums"><span id="stat-recyclable">0</span><span class="text-[11px] font-medium text-zinc-400 ml-1">%</span></p>
+              <p class="mt-1 text-lg font-bold text-teal-600 tabular-nums"><span id="stat-recyclable" class="js-skel">0</span><span class="text-[11px] font-medium text-zinc-400 ml-1">%</span></p>
             </div>
           </div>
         </article>
@@ -678,14 +726,23 @@
           </div>
         </article>
 
-        <!-- MODULE C · Detected items inspector -->
-        <div class="flex items-baseline justify-between px-1">
-          <h2 class="text-sm font-bold text-zinc-900 tracking-tight">Detected items</h2>
-          <span id="dmm-provider" class="font-mono-d text-[10px] tracking-[0.18em] uppercase text-zinc-400">bi-directional focus · sync’d to canvas</span>
-        </div>
+        <!-- MODULE C · Detected items inspector.
+             Wrapped in a relative container so the recalc mask can overlay
+             the whole panel WITHOUT living inside #items-list (renderItems
+             replaces that innerHTML, which would wipe an inner mask). -->
+        <div class="relative flex flex-col gap-6">
+          <!-- Micro grid-recalculation glass mask (Issue 2) -->
+          <div class="recalc-mask absolute inset-0 z-30 flex items-start justify-center pt-16 bg-white/40 backdrop-blur-[1.5px] rounded-2xl" aria-hidden="true">
+            <div class="cq-ring w-7 h-7 sticky top-24" style="border-width: 2px"></div>
+          </div>
+          <div class="flex items-baseline justify-between px-1">
+            <h2 class="text-sm font-bold text-zinc-900 tracking-tight">Detected items</h2>
+            <span id="dmm-provider" class="font-mono-d text-[10px] tracking-[0.18em] uppercase text-zinc-400">bi-directional focus · sync’d to canvas</span>
+          </div>
 
-        <div id="items-list" class="flex flex-col gap-6">
-          <p id="items-empty" class="text-xs text-zinc-400 px-1">Run a detection to populate the item inspector — every card links 1:1 to its bounding box.</p>
+          <div id="items-list" class="flex flex-col gap-6">
+            <p id="items-empty" class="text-xs text-zinc-400 px-1">Run a detection to populate the item inspector — every card links 1:1 to its bounding box.</p>
+          </div>
         </div>
 
       </div>
@@ -874,7 +931,7 @@ function buildCountrySelect() {
       buildCountrySelect();          // re-render checkmark + hidden input
       syncGeoUi();
       gsap.fromTo("#geo-badge", { scale: 0.92 }, { scale: 1, duration: 0.4, ease: "back.out(2)" });
-      if (state.items.length) { refreshImpact(); refreshRecommendations(); }
+      runGridRefresh();   // micro grid-recalc masks + re-audit + re-rank
     });
   });
 }
@@ -987,6 +1044,10 @@ function captureFrame() {
 async function analyze(file) {
   if (state.busy) return;
   state.busy = true;
+  // Heavy-AI scan state (Issue 1): left canvas mask + right telemetry
+  // skeleton. Set here at the exact start; cleared in finally() below so
+  // BOTH success and error paths always restore normal rendering.
+  document.body.classList.add("is-scanning-active");
   setStatus("ANALYZING…", "warn");
   try {
     const form = new FormData();
@@ -1039,6 +1100,7 @@ async function analyze(file) {
     setStatus("ERROR", "warn");
   } finally {
     state.busy = false;
+    document.body.classList.remove("is-scanning-active");   // never wedge
   }
 }
 
@@ -1050,6 +1112,12 @@ function resetWorkspace() {
      pending debounces cancelled, counter tweens killed). */
   if (state.busy) return;                 // never race an in-flight analysis
   clearTimeout(refreshTimer);
+  // Defensive: NEW SCAN can fire during a grid recalc (which doesn't set
+  // state.busy) — drop any lingering loading masks so the pristine state is
+  // truly clean. The in-flight refresh's own finally() is a no-op once the
+  // class is gone.
+  document.body.classList.remove("is-scanning-active", "is-recalculating-grid");
+  gridRefreshInFlight = 0;
   gsap.killTweensOf(carbonShown);
   gsap.killTweensOf(state);
   closeCamera();
@@ -1392,14 +1460,32 @@ function renderItems() {
   applyConfFilter();   // fresh DOM — re-apply the confidence view filter
 }
 
+// Grid-recalculation loading state (Issue 2): a country switch or a debounced
+// weight edit re-audits + re-ranks. A counter keeps the glass masks up while
+// ANY refresh is in flight, so overlapping triggers (rapid country flips)
+// can't let an early finally() lift the mask over a still-running refresh.
+// Both refreshers swallow their own errors, so Promise.all always settles —
+// the finally() guarantees the masks lift even on a network timeout/abort.
+let gridRefreshInFlight = 0;
+async function runGridRefresh() {
+  if (!state.items.length) return;
+  gridRefreshInFlight++;
+  document.body.classList.add("is-recalculating-grid");
+  setStatus("RECALIBRATING…", "warn");
+  try {
+    await Promise.all([refreshImpact(), refreshRecommendations()]);
+  } finally {
+    if (--gridRefreshInFlight === 0) {
+      document.body.classList.remove("is-recalculating-grid");
+      setStatus("READY");
+    }
+  }
+}
+
 let refreshTimer = null;
 function scheduleRefresh() {
   clearTimeout(refreshTimer);
-  refreshTimer = setTimeout(async () => {
-    setStatus("AUDITING…", "warn");
-    await Promise.all([refreshImpact(), refreshRecommendations()]);
-    setStatus("READY");
-  }, 650);
+  refreshTimer = setTimeout(runGridRefresh, 650);
 }
 
 function setActive(id) {
