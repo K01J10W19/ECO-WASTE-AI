@@ -107,6 +107,23 @@ METHOD_DISPLAY_NAMES = {
 # Rank 3 the worst-case baseline of the simulated set.
 STATUS_TAGS = {1: "Optimal", 2: "Acceptable", 3: "Warning"}
 
+# ISO alpha-2 → full country name for the geopolitical LLM directive (the
+# model grounds its advice in the named country's real infrastructure). Codes
+# outside the CarbIQ selector fall back to the raw upper-cased code.
+_COUNTRY_NAMES = {
+    "MY": "Malaysia", "SG": "Singapore", "JP": "Japan", "CN": "China",
+    "IN": "India", "US": "the United States", "GB": "the United Kingdom",
+    "DE": "Germany", "FR": "France", "AU": "Australia", "NZ": "New Zealand",
+}
+
+
+def _country_display(code) -> str:
+    """Full country name for the prompt; 'global average' when no country."""
+    if not code:
+        return "global average"
+    code = str(code).strip().upper()
+    return _COUNTRY_NAMES.get(code, code)
+
 # ---------------------------------------------------------------------------
 # LOCAL EXPERT KNOWLEDGE GRID (v3.6 hyper-simple register).
 #
@@ -265,13 +282,84 @@ EXPERT_KNOWLEDGE = {
 }
 
 # ---------------------------------------------------------------------------
+# LOCAL ACTION-PROTOCOL STEPS (companion to EXPERT_KNOWLEDGE).
+#
+# Exactly TWO ordered, child-simple do-this steps per path — the deterministic
+# fallback for the ``action_steps`` field (and the default when no LLM key is
+# set). Deliberately COUNTRY-NEUTRAL: the LLM layer localizes them to the
+# request country's real bins/rules; the local grid stays universal. Keys stay
+# in lockstep with DISPOSAL_PATHS (a test enforces 7x3 coverage + exactly 2
+# steps). Same hyper-simple register as EXPERT_KNOWLEDGE.
+# ---------------------------------------------------------------------------
+EXPERT_ACTION_STEPS = {
+    "plastic": {
+        "recycling": ["Rinse the bottle and squash it flat to save space.",
+                      "Drop it in the recycling bin — clean and dry."],
+        "incineration": ["Empty and dry the plastic so it burns cleanly.",
+                         "Put it in the general-waste bin for the energy plant."],
+        "landfill": ["Only bin plastic too dirty or mixed to recycle.",
+                     "Tie the bag well so nothing blows away outside."],
+    },
+    "glass": {
+        "recycling": ["Rinse the jar and take off any metal lid.",
+                      "Place it gently, unbroken, in the glass bank."],
+        "incineration": ["Wrap broken glass in paper so no one gets cut.",
+                         "Bin it — glass will not burn, but stays contained."],
+        "landfill": ["Wrap sharp pieces safely before binning them.",
+                     "Send only glass that cannot be recycled."],
+    },
+    "metal": {
+        "recycling": ["Rinse the can and lightly crush it flat.",
+                      "Drop it in the metals recycling bin."],
+        "incineration": ["Scrape out any leftover food from the can.",
+                         "Bin it — magnets pull the metal from the ash."],
+        "landfill": ["Bin only metal that truly cannot be recycled.",
+                     "Tuck sharp lids inside the can first."],
+    },
+    "cardboard": {
+        "recycling": ["Flatten the box and peel off tape or plastic.",
+                      "Stack it in the paper bin, kept dry."],
+        "incineration": ["Keep greasy or wet card out of recycling.",
+                         "Put it in general waste to burn for power."],
+        "landfill": ["Bin only soiled cardboard that cannot be recycled.",
+                     "Break it down so it packs flat."],
+    },
+    "paper": {
+        "recycling": ["Keep the paper clean, dry and unfolded.",
+                      "Add it to the paper recycling bin."],
+        "incineration": ["Set aside greasy or shiny paper that cannot recycle.",
+                         "Put it in the energy-from-waste bin."],
+        "landfill": ["Landfill only soggy or food-stained paper.",
+                     "Bag it so it stays contained."],
+    },
+    "biodegradable": {
+        "composting": ["Collect food scraps in a small kitchen caddy.",
+                       "Empty it into the compost or food-waste bin."],
+        "anaerobic_digestion": ["Separate cooked food and peelings.",
+                                "Put them in the food-waste bin for the biogas plant."],
+        "landfill": ["Avoid this — buried food makes planet-warming gas.",
+                     "If you must, bag the scraps tightly first."],
+    },
+    "general rubbish": {
+        "material_recovery": ["Pull out any recyclables so sorting works better.",
+                              "Bin the mixed leftovers for the sorting machines."],
+        "incineration": ["Drain any liquids from the rubbish first.",
+                         "Bag it up for the waste-to-energy plant."],
+        "landfill": ["Use landfill only when nothing else fits.",
+                     "Tie the bag so the dirty juice stays in."],
+    },
+}
+
+
+# ---------------------------------------------------------------------------
 # v3.6 LLM GENERATION PIPELINE ("Hyper-Simple & Country-Aware").
 #
 # One batched call per request to an OpenAI-compatible chat-completions
 # endpoint (LLM_API_URL/LLM_API_KEY/LLM_MODEL in config — free tiers work:
 # Groq, OpenRouter, Gemini's compat endpoint, or a fully local Ollama).
-# The LLM may ONLY write the three literary fields; every number, rank and
-# method id is computed locally and passed in read-only.
+# The LLM may ONLY write the four text fields (verdict, pros, cons and the
+# two-step action_steps); every number, rank and method id is computed
+# locally and passed in read-only.
 # ---------------------------------------------------------------------------
 # Free-tier "thinking" models (e.g. gemini-flash-latest) can spend a long
 # while reasoning before emitting the JSON — 30 s produced spurious timeouts
@@ -327,48 +415,61 @@ LLM_SYSTEM_PROMPT = """\
 You are the friendly, plain-spoken voice of a family waste-sorting app.
 You rewrite disposal advice so a 10-year-old instantly gets it.
 
-You receive JSON: a "country" plus scanned waste "items". Each item has an
-"index", a "material", its "weight_kg", and exactly 3 end-of-life "paths".
-Each path gives: "method", "rank" (1 = best, 3 = worst), "status_tag",
-"carbon_impact_kg" (negative = it REMOVES pollution), "saving_vs_worst_kg"
-and "extra_vs_best_kg".
+You receive JSON: a "country_name" (the user's country) plus scanned waste
+"items". Each item has an "index", a "material", its "weight_kg", and exactly
+3 end-of-life "paths". Each path gives: "method", "method_display", "rank"
+(1 = best, 3 = worst), "status_tag", "carbon_impact_kg" (negative = it REMOVES
+pollution), "saving_vs_worst_kg" and "extra_vs_best_kg".
 
-For EVERY path of EVERY item write exactly three fields:
+CRITICAL DIRECTIVE: the user is currently residing in the given
+"country_name". You MUST analyse each disposal pathway strictly through the
+lens of THAT country's actual recycling infrastructure, national sanitation
+regulations, and native waste-separation habits. For example: if Germany,
+build on the bottle-deposit return machines you take empties back to (Pfand);
+if Malaysia, ground it in the community colour-sorted bins (e.g. brown for
+glass); if Singapore, align with the single mixed bin where nearly everything
+is burned for energy. Never supply generic Western tropes that contradict the
+local reality. If "country_name" is "global average", keep the text universal.
+
+For EVERY path of EVERY item write exactly FOUR fields:
 1. "encouraging_verdict" — celebrate rank 1, gently nudge rank 2, sternly
    warn rank 3. MUST weave in the numbers provided (kg and/or rank).
 2. "environmental_pros" — the immediate, everyday benefit of this choice.
 3. "environmental_cons" — a stark but 100% truthful long-term consequence.
+4. "action_steps" — an array of EXACTLY TWO short, ordered do-this steps that
+   walk the user through this exact pathway using their country's REAL bins
+   and rules. Step 1 = prepare it at home; Step 2 = where/how it goes. Each
+   step is one plain imperative sentence, 4 to 20 words.
 
 HARD RULES
-- Each field is 1-2 COMPLETE sentences, 8 to 25 words. NEVER telegram
+- Text fields (1-3) are 1-2 COMPLETE sentences, 8 to 25 words. NEVER telegram
   fragments ("Great, rank 1!") and NEVER the word "None" alone — every
   field must say something real and specific.
 - Field jobs: the verdict carries the feeling AND the numbers; the pros
   paint the everyday benefit in plain images (do NOT just repeat the kg
-  figure); the cons describe one concrete long-term harm.
+  figure); the cons describe one concrete long-term harm; the steps are
+  practical and country-specific.
 - Words a child knows. NEVER use jargon like "carbon-negative", "offset",
   "displace", "biogenic", "anaerobic decomposition", "leachate", "CO2e",
   "emission factor". Prefer everyday images: "planet-warming gas",
   "saving electricity", "trash on our beaches", "burning coal".
 - Use ONLY the numbers provided — never invent or change them.
-- If "country" is a real country code, ground pros/cons in that country's
-  everyday reality (its beaches and oceans if coastal, its crowded
-  landfills, its power grid). If "country" is "global average", keep the
-  text universal.
 - Reply with STRICT JSON ONLY — no markdown, no commentary — shaped:
   {"items":[{"index":0,"paths":[{"method":"recycling",
   "encouraging_verdict":"...","environmental_pros":"...",
-  "environmental_cons":"..."}]}]}
+  "environmental_cons":"...","action_steps":["...","..."]}]}]}
   Cover every item and every path exactly once, keeping the given
   "method" ids and "index" values unchanged.
 
-EXAMPLE of ONE well-written path — match this quality and length:
+EXAMPLE of ONE well-written path (country_name "Malaysia") — match this
+quality and length:
 {"method":"recycling","encouraging_verdict":"Amazing pick — rank 1!
 Recycling this saves 1.7 kg of planet-warming gas, like switching off the
 lights for a whole week.","environmental_pros":"Old bottles become new
 ones, so factories burn less oil and beaches stay clean.",
 "environmental_cons":"Dirty or greasy plastic spoils the whole batch and
-ends up dumped instead."}
+ends up dumped instead.","action_steps":["Rinse the bottle and squash it
+flat at home.","Drop it in the orange recycling bin for plastics."]}
 """
 
 
@@ -532,6 +633,8 @@ def simulate_disposal_paths(material: str, weight_kg: float, _pool=None,
                 rank, material, method, co2e_kg, best_co2e, worst_co2e),
             "environmental_pros": knowledge["pros"],
             "environmental_cons": knowledge["cons"],
+            # Two ordered do-this steps (LLM localizes; local grid is neutral).
+            "action_steps": list(EXPERT_ACTION_STEPS[material][method]),
         })
 
     # Nationally banned paths ride LAST: numbers preserved for transparency,
@@ -555,6 +658,9 @@ def simulate_disposal_paths(material: str, weight_kg: float, _pool=None,
                 method, profile.get("reason", "not available")),
             "environmental_pros": knowledge["pros"],
             "environmental_cons": knowledge["cons"],
+            # Carried for schema completeness; banned paths are never the
+            # selected panel path, so these steps stay off-screen.
+            "action_steps": list(EXPERT_ACTION_STEPS[material][method]),
         })
     return ranked
 
@@ -593,6 +699,7 @@ def _llm_context(results: list, country: str) -> dict:
             "paths": [
                 {
                     "method": path["method"],
+                    "method_display": path["method_display"],
                     "rank": path["rank"],
                     "status_tag": path["status_tag"],
                     "carbon_impact_kg": path["carbon_impact_kg"],
@@ -604,7 +711,13 @@ def _llm_context(results: list, country: str) -> dict:
                 for path in pool
             ],
         })
-    return {"country": country or "global average", "items": items}
+    # ``country`` stays the raw code (existing contract); ``country_name`` is
+    # the full name the geopolitical directive grounds its advice in.
+    return {
+        "country": country or "global average",
+        "country_name": _country_display(country),
+        "items": items,
+    }
 
 
 def _extract_json(text: str) -> dict:
@@ -622,7 +735,7 @@ def _extract_json(text: str) -> dict:
 def _enrich_with_llm(results: list, country: str,
                      api_key: str, model: str, api_url: str) -> None:
     """
-    Rewrite the three literary fields via the LLM, retrying transient blips.
+    Rewrite the four text fields via the LLM, retrying transient blips.
 
     Fast failures (HTTP 429/5xx "model overloaded", network hiccups,
     malformed or partial output) are retried up to ``_LLM_MAX_ATTEMPTS``
@@ -722,6 +835,17 @@ def _generate_and_apply(results: list, country: str,
                     raise ValueError(
                         f"LLM '{field}' below the quality floor: {value!r}")
                 staged.append((path, field, value))
+            # action_steps: exactly TWO non-empty ordered strings (the model
+            # can omit or malform them — any breach fails the whole enrichment
+            # atomically, so the local neutral steps survive intact).
+            steps = gen["action_steps"]       # KeyError -> fallback upstream
+            if not isinstance(steps, list) or len(steps) != 2:
+                raise ValueError(
+                    f"LLM 'action_steps' must be exactly 2 steps: {steps!r}")
+            steps = [str(s).strip() for s in steps]
+            if not all(steps):
+                raise ValueError("LLM 'action_steps' contains an empty step")
+            staged.append((path, "action_steps", steps))
     for path, field, value in staged:        # atomic: only after FULL validation
         path[field] = value
 

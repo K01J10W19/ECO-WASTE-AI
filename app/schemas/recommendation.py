@@ -79,6 +79,8 @@ class DisposalRecommendation(BaseModel):
     encouraging_verdict: str              # rank-aware copy | fixed policy copy
     environmental_pros: str               # knowledge-base rationale
     environmental_cons: str               # knowledge-base long-term costs
+    # Exactly two ordered, country-localized do-this steps (LLM or local grid).
+    action_steps: List[str] = Field(min_length=2, max_length=2)
 
 
 class RecommendedItem(BaseModel):

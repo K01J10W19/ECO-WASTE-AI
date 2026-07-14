@@ -259,7 +259,7 @@ Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
 | Carbon provider | **Climatiq** (live, Step 5) with the **dummy per-kg coefficients** in `carbon_service.py` as the ever-present blank-key fallback | Dual-stage UX: blind local proxy at upload, audited live factors on user verification; the app never requires a key. |
 | Disposal-path matrix (DMM) | `carbon_service.DISPOSAL_METHOD_FACTORS` — 7 materials × 3 routes of NET kg CO2e/kg code constants, the **GB-anchored baseline** (0.207 kgCO2e/kWh); **credits are NEGATIVE** (offsets). v3.8 re-derives per-country factors at runtime via the Grid-Intensity Proxy Scaling Engine (one cached grid probe, never-raises fallback ladder) | Deterministic, offline-capable, auditable (scaled + base factor AND the grid datum echoed in the payload); the ranking must never block on the network — live regional WASTE factors stay Module 2's audit concern. |
 | Recommendation engine | **Decision Making Module (DMM)** — rule-based 3-path parallel carbon simulation + ascending-CO2e ranking (`recommendation_service.py`); numbers are ALWAYS local | Deterministic engine is the gradeable default; must work fully with no LLM key. |
-| DMM text layer (v3.6) | **Child-Friendly, Country-Localized LLM Generation Pipeline** — one batched strict-JSON call to any free OpenAI-compatible endpoint (`LLM_API_URL`/`LLM_MODEL`, Groq default) rewrites ONLY verdict/pros/cons (1–2 sentences, ≤25 words, zero jargon, localized to `country`); local `EXPERT_KNOWLEDGE` grid (same hyper-simple register) is the default and the atomic fallback | Free-tier friendly, provider-agnostic, zero new deps (`requests`); any LLM failure degrades to `local_fallback` — recommendations never 502. |
+| DMM text layer (v3.6) | **Child-Friendly, Country-Localized LLM Generation Pipeline** — one batched strict-JSON call to any free OpenAI-compatible endpoint (`LLM_API_URL`/`LLM_MODEL`; any provider — Groq/Gemini/OpenRouter/Ollama) rewrites ONLY the four text fields verdict/pros/cons/`action_steps` (1–2 sentences, ≤25 words, zero jargon; a CRITICAL directive grounds them in the request country's real infrastructure); local `EXPERT_KNOWLEDGE` + `EXPERT_ACTION_STEPS` grids (same hyper-simple register) are the default and the atomic fallback | Free-tier friendly, provider-agnostic, zero new deps (`requests`); any LLM failure degrades to `local_fallback` — recommendations never 502. |
 | Backend | **Flask** (app factory + blueprints + services) | Thin controllers, logic in services. |
 | Frontend | HTML5 + Tailwind (CDN) + vanilla JS (ES6+, Fetch) + GSAP 3 (CDN); Inter/JetBrains Mono self-hosted under `app/static/assets/` | **CarbIQ SPA (Step 7, live)** — design-compiled dashboard: detection canvas ↔ item grid synced via echoed ids, IP-geolocated country select, dual-stage carbon telemetry, ranked DMM panels; `/carbon-lab` stays as the dependency-free API tester. |
 | Database | SQLite (optional, for scan history) | Lightweight, local, file-based. |
@@ -553,20 +553,28 @@ Rules:
   child-readable, grounded facts (tests enforce the word budget); the
   `encouraging_verdict` is composed at runtime from the SORTED outcome
   (rank + kg CO2e saved/added), so recalibrated factors can reshuffle ranks
-  without the copy drifting. Per-path payload:
-  `{ method, method_display, rank, status_tag, carbon_factor_kg_per_kg,
-  carbon_impact_kg, encouraging_verdict, environmental_pros,
-  environmental_cons }`.
+  without the copy drifting. `action_steps` (exactly 2 ordered do-this
+  steps per path) comes from the companion `EXPERT_ACTION_STEPS` grid —
+  deliberately country-NEUTRAL locally (the LLM localizes them). Per-path
+  payload: `{ method, method_display, rank, status_tag,
+  carbon_factor_kg_per_kg, base_factor_kg_per_kg, carbon_impact_kg,
+  encouraging_verdict, environmental_pros, environmental_cons,
+  action_steps[2], is_applicable, restriction_reason }`.
 - **v3.6 LLM text layer (optional, free-provider):** when `LLM_API_KEY` is
   set, ONE batched call per request to the OpenAI-compatible chat-completions
   endpoint at `LLM_API_URL` (free tiers: Groq — default, `LLM_MODEL`
   `llama-3.3-70b-versatile` — OpenRouter, Gemini compat, or fully local
-  Ollama) rewrites the three literary fields per path. The
-  `LLM_SYSTEM_PROMPT` enforces the "Hyper-Simple & Country-Aware" standard:
-  ≤25 words per field, jargon banlist (no "carbon-negative"/"offset"/"CO2e"),
-  everyday impact imagery, verdicts that weave in the exact numbers, and
-  pros/cons grounded in the request `country`'s reality (beaches/landfills/
-  power grid) — or universal "global average" text when no country is given.
+  Ollama) rewrites the FOUR text fields per path (verdict, pros, cons and
+  the 2-step `action_steps`). The `LLM_SYSTEM_PROMPT` enforces the
+  "Hyper-Simple & Country-Aware" standard: ≤25 words per field, jargon
+  banlist (no "carbon-negative"/"offset"/"CO2e"), everyday impact imagery,
+  verdicts that weave in the exact numbers. A **CRITICAL geopolitical
+  directive** grounds the advice in the request country's REAL
+  infrastructure (Germany → Pfand deposit-return machines, Malaysia →
+  colour-sorted community bins, Singapore → one mixed waste-to-energy bin);
+  the context carries `country_name` (full name via `_COUNTRY_NAMES`) plus
+  the raw `country` code, and `action_steps` must use that nation's actual
+  bins/rules — or universal "global average" text when no country is given.
   The LLM sees the numbers READ-ONLY (strict-JSON in/out, lenient fence
   parsing); replacements are staged and applied atomically only after full
   7×3-coverage validation. Fast transient failures (429 bursts, 5xx "model
@@ -630,8 +638,10 @@ Rules:
     `factor · source · weight_source`.
   - **DMM panel per card:** `POST /api/recommend` fills the 3 ranked
     process tabs (rank-numbered labels, Optimal/Acceptable/Warning chips,
-    per-path CO2e) + the child-simple verdict and pros/cons; the section
-    header shows the text provider (`llm_enriched` / fallback). Nationally
+    per-path CO2e) + the child-simple verdict and pros/cons + a static
+    **⚡ ACTION PROTOCOL** capsule (rank-coloured left accent, horizontal
+    two-step `➔` chevron pipeline from `action_steps`); the section header
+    shows the text provider (`llm_enriched` / fallback). Nationally
     banned paths (v3.7) render as hard-disabled struck-through pills — no
     rank number, no status badge, hover reason + "not nationally
     applicable" note — and a country switch that invalidates the
@@ -948,7 +958,8 @@ retraining), whereas CLIP's was editable text.
   BEFORE the fan-out, with a never-raises fallback ladder
   (`GRID_INTENSITY_FALLBACK` → 0.207 anchor); recommendations must never
   502 or block because of it; (2) the v3.6 LLM layer — it may ONLY rewrite
-  the three text fields (never ranks, methods, numbers or item order), runs
+  the four text fields — verdict, pros, cons, `action_steps` (never ranks,
+  methods, numbers or item order), runs
   once per request (ONE batched flight for ALL items — `/api/recommend` IS
   the batch endpoint; never add per-item LLM calls), honours `Retry-After`
   on 429 and keeps the module-level time-based cooldown breaker

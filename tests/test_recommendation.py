@@ -100,11 +100,13 @@ def test_ranked_payload_carries_the_full_commentary_contract():
     required = {"method", "method_display", "rank", "status_tag",
                 "is_applicable", "restriction_reason",
                 "carbon_factor_kg_per_kg", "base_factor_kg_per_kg",
-                "carbon_impact_kg",
+                "carbon_impact_kg", "action_steps",
                 "encouraging_verdict", "environmental_pros", "environmental_cons"}
     for path in rs.simulate_disposal_paths("metal", 2.0):
         assert required <= set(path)
         assert path["encouraging_verdict"].strip()
+        assert len(path["action_steps"]) == 2               # exactly two steps
+        assert all(s.strip() for s in path["action_steps"])
     # Factor audit: the echoed per-kg factor matches the matrix.
     best = rs.simulate_disposal_paths("metal", 2.0)[0]
     assert best["carbon_factor_kg_per_kg"] == cs.DISPOSAL_METHOD_FACTORS["metal"]["recycling"]
@@ -487,7 +489,9 @@ def _valid_generation_from(request_body):
             {"method": path["method"],
              "encouraging_verdict": f"Rank {path['rank']} — nice and simple!",
              "environmental_pros": "Saves electricity for your town.",
-             "environmental_cons": "Trash can end up on our beaches."}
+             "environmental_cons": "Trash can end up on our beaches.",
+             "action_steps": ["Rinse it clean at home first.",
+                              "Take it to the right local bin."]}
             for path in item["paths"]]}
         for item in ctx["items"]]})
 
@@ -519,16 +523,48 @@ def test_llm_layer_enriches_fields_and_localizes_country(app, monkeypatch):
     assert "25 words" in system_prompt
     context = jsonlib.loads(captured["body"]["messages"][1]["content"])
     assert context["country"] == "MY"
+    assert context["country_name"] == "Malaysia"       # full name for grounding
     # v3.8: the LLM sees the MY-scaled number (fallback grid 0.585, ratio
     # 2.8261): recycling -1.08 x 2.8261 x 0.5 kg = -1.5261.
     assert context["items"][0]["paths"][0]["carbon_impact_kg"] == \
         pytest.approx(-1.5261, abs=1e-4)
-    # Text fields replaced; numbers, ranks and method ids untouched.
+    # Text fields replaced (incl. the 2-step action guide); numbers, ranks
+    # and method ids untouched.
     top = out["items"][0]["recommendations"][0]
     assert top["encouraging_verdict"] == "Rank 1 — nice and simple!"
     assert top["environmental_pros"] == "Saves electricity for your town."
+    assert top["action_steps"] == ["Rinse it clean at home first.",
+                                   "Take it to the right local bin."]
     assert top["method"] == "recycling"
     assert top["carbon_impact_kg"] == pytest.approx(-1.5261, abs=1e-4)
+    RecommendResponse(**out)
+
+
+def test_llm_malformed_action_steps_falls_back_to_local_grid(app, monkeypatch):
+    # The model returns only ONE step instead of two → the whole enrichment
+    # is rejected atomically and the local neutral steps survive intact.
+    monkeypatch.setattr(rs.time, "sleep", lambda _s: None)
+
+    def one_step_post(url, json=None, headers=None, timeout=None):
+        ctx = jsonlib.loads(json["messages"][1]["content"])
+        return _llm_http_response(200, jsonlib.dumps({"items": [
+            {"index": item["index"], "paths": [
+                {"method": p["method"],
+                 "encouraging_verdict": "Rank one, a really good clean pick!",
+                 "environmental_pros": "Saves lots of power for the town.",
+                 "environmental_cons": "Dirty items get thrown away instead.",
+                 "action_steps": ["Only one step here — malformed."]}
+                for p in item["paths"]]}
+            for item in ctx["items"]]}))
+
+    monkeypatch.setattr(requests, "post", one_step_post)
+    with app.app_context():
+        app.config["LLM_API_KEY"] = "k"
+        out = rs.recommend_for_items([{"material": "plastic", "weight_kg": 0.5}])
+
+    assert out["provider"] == "local_fallback"
+    top = out["items"][0]["recommendations"][0]
+    assert top["action_steps"] == rs.EXPERT_ACTION_STEPS["plastic"]["recycling"]
     RecommendResponse(**out)
 
 
@@ -749,6 +785,11 @@ def test_fallback_grid_and_verdicts_respect_the_word_budget():
             entry = rs.EXPERT_KNOWLEDGE[material][method]
             assert len(entry["pros"].split()) <= 28, (material, method)
             assert len(entry["cons"].split()) <= 28, (material, method)
+            # action_steps grid: 7x3 coverage, exactly 2 short child-simple steps.
+            steps = rs.EXPERT_ACTION_STEPS[material][method]
+            assert len(steps) == 2, (material, method)
+            for step in steps:
+                assert step.strip() and len(step.split()) <= 22, (material, method)
         for path in rs.simulate_disposal_paths(material, 1.0):
             assert len(path["encouraging_verdict"].split()) <= 28, \
                 (material, path["method"])
@@ -756,3 +797,19 @@ def test_fallback_grid_and_verdicts_respect_the_word_budget():
         for path in rs.simulate_disposal_paths(material, 1.0, country="SG"):
             assert len(path["encouraging_verdict"].split()) <= 28, \
                 (material, path["method"], "SG")
+
+
+def test_llm_context_carries_full_country_name_and_prompt_directive():
+    # The system prompt must ship the geopolitical grounding directive, and
+    # the context must translate the ISO code into the full country name the
+    # directive references (so the model localizes to the right nation).
+    assert "CRITICAL DIRECTIVE" in rs.LLM_SYSTEM_PROMPT
+    assert "action_steps" in rs.LLM_SYSTEM_PROMPT
+    results = rs.recommend_for_items(
+        [{"material": "plastic", "weight_kg": 0.5}], country="DE")
+    # recommend_for_items resolves numbers locally; build the context directly.
+    ctx = rs._llm_context(results["items"], "DE")
+    assert ctx["country"] == "DE"                 # raw code contract preserved
+    assert ctx["country_name"] == "Germany"       # full name for the directive
+    assert rs._country_display(None) == "global average"
+    assert rs._country_display("my") == "Malaysia"
