@@ -56,24 +56,23 @@ _PAD_FILL = (114, 114, 114)
 # Processing layer: the ViT's native input resolution.
 _PATCH_SIZE = 224
 
-# Stage-1 suppression — the owner-locked configuration (2026-07-14):
-# PER-CLASS NMS (agnostic_nms=False, the Ultralytics default behaviour) at a
-# relaxed 0.60 IoU. Investigation notes preserved for the report:
-#   * CLUSTER MERGING of identical items (three bottles → one group box) is
-#     a MODEL-CAPACITY limit of the nano detector, not a suppression
-#     artifact: the raw candidate pool held NO per-bottle boxes above 1%
-#     conf, and agnostic True/False outputs were byte-identical on the
-#     probe scene (same-class boxes are compared identically in both
-#     modes). Only the A/B locators (yolov8m-seg-trash, yolo26x-seg) split
-#     such scenes — the owner prefers keeping the object detector.
-#   * ACCEPTED TRADE-OFF of per-class mode: one physical object firing
-#     under TWO coarse labels (e.g. "Paper" + "Waste", IoU >= ~0.8) can
-#     survive suppression twice and reach Stage 2 as duplicate frames
-#     (observed 2026-07-14 am). If that re-bites, the remedies are
-#     agnostic_nms=True or a payload-level overlap dedupe.
+# Stage-1 suppression — the FINAL locked configuration (2026-07-14, after a
+# full investigation cycle): CLASS-AGNOSTIC NMS at a relaxed 0.60 IoU.
+#   * agnostic_nms=True kills the observed DUPLICATE-FRAME bug: one physical
+#     object firing under TWO coarse labels (e.g. "Paper" + "Waste",
+#     IoU >= ~0.8) survived per-class suppression twice and Stage 2 named
+#     both crops identically. Per-class mode was trialled and reverted the
+#     same day once the trade-off was weighed.
+#   * iou=0.60 (raised from 0.45) lets tightly packed DISTINCT items keep
+#     their boxes — adjacent items can legitimately overlap ~50%.
+#   * KNOWN LIMIT (NMS-independent): identical-item clusters (three bottles
+#     → one group box) are a nano-detector CAPACITY limit — the raw
+#     candidate pool held NO per-bottle boxes above 1% conf and agnostic
+#     True/False were byte-identical on the probe scene. Only the A/B
+#     locators (yolov8m-seg-trash, yolo26x-seg) split such scenes.
 # The NMS-free A/B baselines (YOLO26, RT-DETR) accept and ignore both args.
 _NMS_IOU = 0.60
-_NMS_AGNOSTIC = False
+_NMS_AGNOSTIC = True
 
 # ---------------------------------------------------------------------------
 # Method B calibration constants (Plasticity Index psi).

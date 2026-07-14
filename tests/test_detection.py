@@ -8,8 +8,8 @@ Method B physics extractor) runs for real on tiny generated images. We verify
 the detect → pad → classify → tie-break → carbon composition, the
 box-area payload, the box-area dynamic carbon formula (gamma = 8000), the psi
 plastic-vs-glass tie-breaker, box clamping, the Stage-1 conf override, the
-Stage-1 suppression contract (per-class NMS, relaxed IoU — owner-locked),
-and that an empty result is valid.
+Stage-1 suppression contract (class-agnostic NMS, relaxed IoU), and that an
+empty result is valid.
 """
 import types
 
@@ -152,12 +152,11 @@ def test_conf_override_surfaces_more_detections(app, monkeypatch, tmp_path):
 
 
 def test_predict_runs_the_locked_suppression_contract(app, monkeypatch, tmp_path):
-    """Pins the owner-locked Stage-1 suppression: PER-CLASS NMS
-    (agnostic_nms=False) at the relaxed 0.60 IoU. Context preserved:
-    agnostic mode was trialled against duplicate cross-class frames and
-    reverted by owner preference; identical-item cluster merging proved to
-    be a model-capacity limit unaffected by either flag (see the constants
-    block in detection_service)."""
+    """Pins the locked Stage-1 suppression: CLASS-AGNOSTIC NMS at the
+    relaxed 0.60 IoU — the final setting of the 2026-07-14 investigation
+    cycle (agnostic kills duplicate cross-class frames; identical-item
+    cluster merging is a model-capacity limit unaffected by either flag —
+    see the constants block in detection_service)."""
     captured = {}
     result = types.SimpleNamespace(orig_shape=(720, 1280), boxes=[])
 
@@ -173,7 +172,7 @@ def test_predict_runs_the_locked_suppression_contract(app, monkeypatch, tmp_path
         expected_conf = float(app.config["CONFIDENCE_THRESHOLD"])
         ds.analyze_waste_pipeline(_real_image(tmp_path))
 
-    assert captured["agnostic_nms"] is ds._NMS_AGNOSTIC is False
+    assert captured["agnostic_nms"] is ds._NMS_AGNOSTIC is True
     assert captured["iou"] == ds._NMS_IOU == 0.60
     assert captured["conf"] == expected_conf
 

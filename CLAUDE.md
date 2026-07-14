@@ -52,8 +52,8 @@ rarely fires; nano backbone = max fps                     │
 5 coarse labels (Glass/Metal/Paper/                       ▼
 Plastic/Waste) noted as `located_as`,             ψ TIE-BREAK: ambiguous plastic-vs-
 NEVER trusted for identity                        glass calls corrected by physics
-conf=0.15 (recall-first) + per-class NMS
-(agnostic_nms=False, iou=0.60 — owner-locked)
+conf=0.15 (recall-first) + class-agnostic
+NMS (agnostic_nms=True, iou=0.60)
          │
          └── Processing layer (anchored directly on box.xyxy):
              (a) CONTEXT-AWARE SQUARE PADDING:
@@ -167,7 +167,7 @@ Upload (multipart image)
   → POST /api/predict (thin controller: validate, save, delegate)
     → detection_service.analyze_waste_pipeline(image_path)
        1. Stage 1: specialist waste detector (models/yolov8n-waste-det.pt,
-          auto-fetched if missing), predict (conf 0.15 + per-class NMS, iou 0.60)
+          auto-fetched if missing), predict (conf 0.15 + agnostic NMS, iou 0.60)
           → per instance: bbox via box.xyxy (clamped), box_confidence,
             located_as (Glass/Metal/Paper/Plastic/Waste — diagnostic),
             box_area_px = (x2-x1)*(y2-y1)
@@ -223,19 +223,18 @@ Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
 - Stage 1 stays vocabulary-free at call time: NO `set_classes()`, no prompt lists —
   that approach is archived (§11) after failing empirically. `located_as` is
   diagnostic-only; never surface it as the material or branch on it.
-- The Stage-1 predict call passes `conf` **plus PER-CLASS suppression
-  (`agnostic_nms=False, iou=0.60`)** — the owner-locked setting (2026-07-14).
-  Investigation history (report material): class-agnostic mode was trialled
-  to kill duplicate cross-class frames (one object firing "Paper" + "Waste",
-  both named identically by Stage 2); the three-bottle probe then proved
-  identical-item CLUSTER MERGING is a nano-detector CAPACITY limit (no
-  per-bottle candidates above 1% conf; agnostic True/False byte-identical
-  on the scene) and the owner reverted to per-class, preferring the plain
-  object detector over the cluster-splitting segmentation A/Bs. ACCEPTED
-  TRADE-OFF: cross-class double-fires on one object (IoU ≥ ~0.8) may
-  surface as duplicate frames again — remedies if that re-bites:
-  `agnostic_nms=True` or a payload-level overlap dedupe. The NMS-free A/B
-  baselines (YOLO26, RT-DETR) ignore these args. No further knobs.
+- The Stage-1 predict call passes `conf` **plus CLASS-AGNOSTIC suppression
+  (`agnostic_nms=True, iou=0.60`)** — the FINAL setting of the 2026-07-14
+  investigation cycle (report material). Agnostic NMS kills the observed
+  duplicate-frame bug (one object firing "Paper" + "Waste" at IoU ≥ ~0.8,
+  both named identically by Stage 2); per-class mode was trialled and
+  reverted the same day. iou=0.60 (raised from 0.45) preserves tightly
+  packed DISTINCT items. KNOWN LIMIT, NMS-independent: identical-item
+  clusters (three bottles) merge into one group box — a nano-detector
+  CAPACITY limit (no per-bottle candidates above 1% conf; agnostic
+  True/False byte-identical on the probe scene) that only the A/B
+  segmentation locators resolve. The NMS-free A/B baselines (YOLO26,
+  RT-DETR) ignore these args. No further knobs.
 - Method B is a **tie-breaker, not a classifier**: it may only ever reorder an
   ambiguous plastic-vs-glass top-2; never let ψ overrule a clear ViT verdict or
   touch other materials.
@@ -255,7 +254,7 @@ Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
 | Processing layer (b) | **Method B** — `cv2.Laplacian` variance + `cv2.Canny` density → ψ; refs 500 / 0.10; tie-break margin 0.15 | Classical physics separates transparent glass vs plastic with zero retraining; tie-breaker only, fully audited in the payload. |
 | Stage 2 classifier | **`edwinpalegre/ee8225-group4-vit-trashnet-enhanced`** via HF `transformers` image-classification pipeline | Supervised ViT-B/16, TrashNet-enhanced, 98.17% val acc, Apache-2.0; native 7 labels (verified) map 1:1 onto the taxonomy. |
 | Label mapping | model `trash` → system `general rubbish`; all other labels identity | `MODEL_LABEL_TO_MATERIAL` in classification_service; tests enforce full coverage. |
-| Stage 1 tuning | `conf=0.15` default (per-request override) + **per-class NMS** (`agnostic_nms=False, iou=0.60` — `_NMS_AGNOSTIC`/`_NMS_IOU` in `detection_service.py`) | Recall-first (Stage 2 carries per-item certainty); owner-locked 2026-07-14 after the cluster investigation — identical-item merges are a nano-detector capacity limit unaffected by the agnostic flag (only the A/B locators split them); accepted trade-off: cross-class double-fires may duplicate (remedy: agnostic_nms=True or payload dedupe). NMS-free A/B baselines ignore the args. |
+| Stage 1 tuning | `conf=0.15` default (per-request override) + **class-agnostic NMS** (`agnostic_nms=True, iou=0.60` — `_NMS_AGNOSTIC`/`_NMS_IOU` in `detection_service.py`) | Recall-first (Stage 2 carries per-item certainty); agnostic suppression kills duplicate cross-class boxes on one object, iou 0.60 keeps adjacent DISTINCT items apart. Identical-item cluster merges are a nano-detector capacity limit unaffected by these knobs (only the A/B locators split them). NMS-free A/B baselines ignore the args. |
 | Carbon scaling | `estimated_carbon_kg = base x (box_area_px / γ)`, **γ = 8000** (recalibrated from 5000 for rectangular over-coverage, fill factor ~0.6) | Box area as volume/mass proxy until Step 5's real weights. |
 | Carbon provider | **Climatiq** (live, Step 5) with the **dummy per-kg coefficients** in `carbon_service.py` as the ever-present blank-key fallback | Dual-stage UX: blind local proxy at upload, audited live factors on user verification; the app never requires a key. |
 | Disposal-path matrix (DMM) | `carbon_service.DISPOSAL_METHOD_FACTORS` — 7 materials × 3 routes of NET kg CO2e/kg code constants, the **GB-anchored baseline** (0.207 kgCO2e/kWh); **credits are NEGATIVE** (offsets). v3.8 re-derives per-country factors at runtime via the Grid-Intensity Proxy Scaling Engine (one cached grid probe, never-raises fallback ladder) | Deterministic, offline-capable, auditable (scaled + base factor AND the grid datum echoed in the payload); the ranking must never block on the network — live regional WASTE factors stay Module 2's audit concern. |
@@ -350,9 +349,9 @@ archived in §11 after failing empirically). What matters:
   from Stage 2 (+ the ψ tie-break); the pipeline never branches on `located_as` —
   even though the detector's labels *look* like materials, they are coarse,
   unvalidated, and NOT the verdict.
-- The predict call passes `conf` plus per-class suppression
-  (`agnostic_nms=False, iou=0.60`) — owner-locked; see the §2 hard rule for
-  the investigation history and the accepted cross-class duplicate trade-off.
+- The predict call passes `conf` plus class-agnostic suppression
+  (`agnostic_nms=True, iou=0.60`) — see the §2 hard rule for the
+  investigation history and the cluster capacity-limit caveat.
 
 ### Stage 2 — system taxonomy (`classification_service.MATERIAL_CLASSES`)
 
@@ -416,8 +415,8 @@ Rules:
     import services freely.
   - Stage-1 threshold: `CONFIDENCE_THRESHOLD` (default **0.15**, recall-first);
     per-request `conf` form-field override (clamped to [0.01, 1.0]). The predict
-    call adds per-class NMS (`agnostic_nms=False, iou=0.60`) — the
-    owner-locked suppression setting (§2 hard rules carry the trade-offs).
+    call adds class-agnostic NMS (`agnostic_nms=True, iou=0.60`) — the
+    locked suppression setting (§2 hard rules carry the history).
     Device from `INFERENCE_DEVICE` for both towers.
   - All failures surface as `ApiError`; empty detections are a valid result.
 - **Hardware:** CPU works (well under a second per image for the nano detector);
@@ -688,7 +687,7 @@ LLM_API_URL=https://api.groq.com/openai/v1/chat/completions
 MODEL_PATH=models/yolov8n-waste-det.pt   # Stage 1 specialist detector (auto-fetched if missing)
                                           # A/B: models/yolov8m-seg-trash.pt | yolo26x-seg.pt
 VIT_MODEL_NAME=edwinpalegre/ee8225-group4-vit-trashnet-enhanced   # Stage 2 (HF model id)
-CONFIDENCE_THRESHOLD=0.15         # Stage 1, recall-first (code also fixes per-class NMS, iou=0.60)
+CONFIDENCE_THRESHOLD=0.15         # Stage 1, recall-first (code also fixes agnostic NMS, iou=0.60)
 INFERENCE_DEVICE=0                # BOTH towers: "cpu" or CUDA index ("0")
 DATABASE_URL=sqlite:///waste_app.db
 ```
@@ -887,20 +886,19 @@ retraining), whereas CLIP's was editable text.
   (§2, §11). `located_as` is diagnostic-only — even though the specialist's labels
   LOOK like materials (Glass/Metal/Paper/Plastic/Waste), never display them as the
   verdict or branch on them.
-- Stage-1 suppression is **owner-locked to PER-CLASS NMS**: the predict call
-  fixes `agnostic_nms=False, iou=0.60` (`_NMS_AGNOSTIC`/`_NMS_IOU` in
-  `detection_service.py`; decision 2026-07-14 after the three-bottle probe).
-  Facts to remember before touching these knobs again: (1) identical-item
-  cluster merging is a nano-detector CAPACITY limit — the raw candidate pool
-  held no per-bottle boxes above 1% conf, agnostic True/False were
-  byte-identical on the probe scene, and only the A/B locators split such
-  scenes; (2) per-class mode lets one object firing under two coarse labels
-  (IoU ≥ ~0.8) survive twice — if duplicate frames on single objects
-  re-appear, the remedies are `agnostic_nms=True` or a payload-level overlap
-  dedupe; (3) if clustered sub-boxes are missing, suspect the CONF gate
-  (0.15) — testable via the /api/predict `conf` form-field override. The
-  NMS-free A/B baselines (YOLO26, RT-DETR) ignore both args. Add no other
-  NMS knobs (`max_det`, etc.).
+- Stage-1 suppression is **locked to CLASS-AGNOSTIC NMS**: the predict call
+  fixes `agnostic_nms=True, iou=0.60` (`_NMS_AGNOSTIC`/`_NMS_IOU` in
+  `detection_service.py`; the FINAL setting of the 2026-07-14 investigation
+  cycle — agnostic kills duplicate cross-class frames on one object, and
+  per-class mode was trialled + reverted the same day). Facts before
+  touching these knobs again: (1) identical-item cluster merging is a
+  nano-detector CAPACITY limit — the raw candidate pool held no per-bottle
+  boxes above 1% conf and agnostic True/False were byte-identical on the
+  probe scene; only the A/B locators split such scenes; (2) if clustered
+  sub-boxes are missing, suspect the CONF gate (0.15) — testable via the
+  /api/predict `conf` form-field override. The NMS-free A/B baselines
+  (YOLO26, RT-DETR) ignore both args. Add no other NMS knobs (`max_det`,
+  etc.).
 - Method B is a TIE-BREAKER only: it may reorder an ambiguous plastic-vs-glass top-2
   (gap < `PLASTICITY_TIEBREAK_MARGIN` = 0.15) and nothing else. Its constants
   (`_LAPLACIAN_REF`, `_EDGE_DENSITY_REF`, margin) are code constants in
