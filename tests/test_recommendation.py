@@ -91,7 +91,8 @@ def test_organics_prefer_energy_capture_over_landfill():
 def test_ranked_payload_carries_the_full_commentary_contract():
     required = {"method", "method_display", "rank", "status_tag",
                 "is_applicable", "restriction_reason",
-                "carbon_factor_kg_per_kg", "carbon_impact_kg",
+                "carbon_factor_kg_per_kg", "base_factor_kg_per_kg",
+                "carbon_impact_kg",
                 "encouraging_verdict", "environmental_pros", "environmental_cons"}
     for path in rs.simulate_disposal_paths("metal", 2.0):
         assert required <= set(path)
@@ -141,14 +142,19 @@ def test_no_country_leaves_every_path_applicable():
 
 
 def test_sg_zero_landfill_reranks_among_applicable_paths():
-    ranked = rs.simulate_disposal_paths("plastic", 0.5, country="SG")
+    # country="SG" alone (no explicit grid_intensity) applies the ban at the
+    # GB anchor; the grid datum is resolved by recommend_for_items, so here
+    # we pass SG's fallback intensity exactly as the aggregate entry would.
+    ranked = rs.simulate_disposal_paths("plastic", 0.5, country="SG",
+                                        grid_intensity=0.408)
     assert len(ranked) == 3                       # banned path stays visible
     banned = next(p for p in ranked if p["method"] == "landfill")
     assert banned["is_applicable"] is False
-    assert banned["rank"] is None and banned["status_tag"] is None
+    assert banned["rank"] is None and banned["status_tag"] == "Banned"
     assert "Singapore" in banned["restriction_reason"]
     assert "not an option" in banned["encouraging_verdict"]
-    assert banned["carbon_impact_kg"] == pytest.approx(0.045)   # still priced
+    # Still priced (bio-decay branch: 0.09 x (1 + (ratio-1) x 0.5) x 0.5 kg).
+    assert banned["carbon_impact_kg"] == pytest.approx(0.0668, abs=1e-4)
 
     # Ranking recomputed EXCLUSIVELY among the applicable pool: without the
     # ban, landfill held rank 2 — now incineration inherits it.
@@ -156,8 +162,9 @@ def test_sg_zero_landfill_reranks_among_applicable_paths():
     assert [p["method"] for p in applicable] == ["recycling", "incineration"]
     assert [p["rank"] for p in applicable] == [1, 2]
     assert [p["status_tag"] for p in applicable] == ["Optimal", "Acceptable"]
-    # Verdict deltas draw from the applicable pool (worst = incineration).
-    assert "1.715" in applicable[0]["encouraging_verdict"]  # 1.175 - (-0.54)
+    # Verdict deltas draw from the applicable pool's SCALED numbers:
+    # worst (2.35 - 0.5x0.201) x 0.5 = 1.1247, best -2.1287 x 0.5 = -1.0643.
+    assert "2.189" in applicable[0]["encouraging_verdict"]
 
 
 def test_de_landfill_ban_applies_and_my_stays_unrestricted():
@@ -168,17 +175,20 @@ def test_de_landfill_ban_applies_and_my_stays_unrestricted():
 
 
 def test_recommend_summary_and_savings_use_applicable_pool_only():
-    # Biodegradable under SG: landfill (0.90/kg, the global worst) is banned,
-    # so the worst-case baseline must pivot to composting (0.05/kg).
+    # Biodegradable under SG: landfill (the global worst) is banned, so the
+    # worst-case baseline must pivot to composting. Numbers are the v3.8
+    # SG-scaled factors (hermetic fallback map: 0.408 kg/kWh, ratio 1.9710):
+    #   AD         -0.14 - 0.2 x (0.408 - 0.207)        = -0.1802
+    #   composting  0.05 x (1 + 0.9710 x 0.3)           =  0.0646
     out = rs.recommend_for_items(
         [{"material": "biodegradable", "weight_kg": 1.0}], country="SG")
 
     item = out["items"][0]
     assert item["best_method"] == "anaerobic_digestion"
-    assert item["max_saving_kg"] == pytest.approx(0.19)          # 0.05 - (-0.14)
-    assert out["summary"]["optimal_total_co2e_kg"] == pytest.approx(-0.14)
-    assert out["summary"]["worst_total_co2e_kg"] == pytest.approx(0.05)
-    assert out["summary"]["max_saving_kg"] == pytest.approx(0.19)
+    assert item["max_saving_kg"] == pytest.approx(0.2448, abs=1e-4)
+    assert out["summary"]["optimal_total_co2e_kg"] == pytest.approx(-0.1802)
+    assert out["summary"]["worst_total_co2e_kg"] == pytest.approx(0.0646)
+    assert out["summary"]["max_saving_kg"] == pytest.approx(0.2448, abs=1e-4)
     RecommendResponse(**out)
 
 
@@ -230,14 +240,133 @@ def test_llm_context_and_enrichment_exclude_banned_paths(app, monkeypatch):
     context = jsonlib.loads(captured["body"]["messages"][1]["content"])
     assert [p["method"] for p in context["items"][0]["paths"]] == \
         ["anaerobic_digestion", "composting"]
-    # …its deltas were applicable-pool relative…
+    # …its deltas were applicable-pool relative (SG-scaled numbers).
     assert context["items"][0]["paths"][0]["saving_vs_worst_kg"] == \
-        pytest.approx(0.19)
+        pytest.approx(0.2448, abs=1e-4)
     # …and the banned path kept its deterministic policy verdict untouched.
     banned = next(p for p in out["items"][0]["recommendations"]
                   if p["method"] == "landfill")
     assert "not an option" in banned["encouraging_verdict"]
     assert banned["encouraging_verdict"] != "Rank None — nice and simple!"
+
+
+# --- v3.8 grid-intensity proxy scaling engine -----------------------------------
+
+def test_grid_scaling_formulas_follow_the_spec():
+    gi = 0.585                                    # MY fallback intensity
+    ratio = gi / cs.BASE_GRID_INTENSITY
+    # Electricity-intensive: base x grid_ratio.
+    assert cs.get_scaled_disposal_factor("plastic", "recycling", gi) == \
+        pytest.approx(-1.08 * ratio)
+    assert cs.get_scaled_disposal_factor("general rubbish", "material_recovery",
+                                         gi) == pytest.approx(0.30 * ratio)
+    # Energy-offsettable: base - energy_yield x (local - anchor) — the credit
+    # is anchor-relative because the base already nets energy recovery at GB.
+    delta = gi - cs.BASE_GRID_INTENSITY
+    assert cs.get_scaled_disposal_factor("plastic", "incineration", gi) == \
+        pytest.approx(2.35 - 0.5 * delta)
+    assert cs.get_scaled_disposal_factor("biodegradable", "anaerobic_digestion",
+                                         gi) == pytest.approx(-0.14 - 0.2 * delta)
+    # Bio-decay: base x (1 + (grid_ratio - 1) x penalty_weight).
+    assert cs.get_scaled_disposal_factor("paper", "landfill", gi) == \
+        pytest.approx(1.29 * (1.0 + (ratio - 1.0) * 0.5))
+    assert cs.get_scaled_disposal_factor("biodegradable", "composting", gi) == \
+        pytest.approx(0.05 * (1.0 + (ratio - 1.0) * 0.3))
+
+
+def test_grid_anchor_identity_leaves_baseline_untouched():
+    # At the GB anchor (and with no intensity at all) every branch collapses
+    # to the curated baseline EXACTLY — the engine's anchor property, and why
+    # every legacy no-country expectation stays byte-identical.
+    for material, methods in rs.DISPOSAL_PATHS.items():
+        for method in methods:
+            base = cs.DISPOSAL_METHOD_FACTORS[material][method]
+            assert cs.get_scaled_disposal_factor(
+                material, method, cs.BASE_GRID_INTENSITY) == pytest.approx(base)
+            assert cs.get_scaled_disposal_factor(
+                material, method, None) == pytest.approx(base)
+
+
+def test_resolve_grid_intensity_ladder(app):
+    cs._fetch_climatiq_grid_intensity.cache_clear()
+    # (a) No country -> the baseline anchor, ratio exactly 1.
+    out = cs.resolve_grid_intensity(None)
+    assert out == {"intensity_kg_per_kwh": cs.BASE_GRID_INTENSITY,
+                   "ratio": 1.0, "source": "baseline"}
+    # (b) Hermetic (blank key): a known country hits the local average map.
+    with app.app_context():
+        app.config["CLIMATIQ_API_KEY"] = ""
+        out = cs.resolve_grid_intensity("my")            # normalised too
+    assert out["intensity_kg_per_kwh"] == pytest.approx(0.585)
+    assert out["source"] == "local_grid_map"
+    # (c) Unknown country -> anchor; the resolver NEVER raises.
+    out = cs.resolve_grid_intensity("ZZ")
+    assert out["source"] == "baseline" and out["ratio"] == 1.0
+
+
+def test_resolve_grid_intensity_live_probe_and_graceful_fallback(app, monkeypatch):
+    cs._fetch_climatiq_grid_intensity.cache_clear()
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["body"] = json
+        return types.SimpleNamespace(status_code=200,
+                                     json=lambda: {"co2e": 0.402})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    with app.app_context():
+        app.config["CLIMATIQ_API_KEY"] = "test-key"
+        out = cs.resolve_grid_intensity("SG")
+    assert out == {"intensity_kg_per_kwh": 0.402,
+                   "ratio": round(0.402 / cs.BASE_GRID_INTENSITY, 4),
+                   "source": "climatiq"}
+    sel = captured["body"]["emission_factor"]
+    assert sel["activity_id"] == cs.CLIMATIQ_GRID_ACTIVITY_ID
+    assert sel["region"] == "SG"
+    assert captured["body"]["parameters"] == {"energy": 1, "energy_unit": "kWh"}
+
+    # Probe failure NEVER raises — it degrades to the local average map.
+    cs._fetch_climatiq_grid_intensity.cache_clear()
+    monkeypatch.setattr(
+        requests, "post",
+        lambda *a, **k: types.SimpleNamespace(status_code=500, json=lambda: {}))
+    with app.app_context():
+        app.config["CLIMATIQ_API_KEY"] = "test-key"
+        out = cs.resolve_grid_intensity("SG")
+    assert out["source"] == "local_grid_map"
+    assert out["intensity_kg_per_kwh"] == pytest.approx(0.408)
+
+
+def test_recommend_response_carries_grid_audit_block():
+    out = rs.recommend_for_items([{"material": "plastic", "weight_kg": 1.0}],
+                                 country="MY")
+    grid = out["grid"]
+    assert grid["country"] == "MY"
+    assert grid["intensity_kg_per_kwh"] == pytest.approx(0.585)
+    assert grid["base_intensity_kg_per_kwh"] == pytest.approx(0.207)
+    assert grid["ratio"] == pytest.approx(0.585 / 0.207, abs=1e-4)
+    assert grid["source"] == "local_grid_map"            # hermetic: no key
+    # The SCALED factor priced the path; the GB baseline rides along.
+    top = out["items"][0]["recommendations"][0]
+    assert top["method"] == "recycling"
+    assert top["base_factor_kg_per_kg"] == pytest.approx(-1.08)
+    assert top["carbon_factor_kg_per_kg"] == pytest.approx(-3.0522, abs=1e-4)
+    assert top["carbon_impact_kg"] == pytest.approx(-3.0522, abs=5e-4)
+    RecommendResponse(**out)
+
+
+def test_grid_scaling_can_reshuffle_ranks_regionally():
+    # General rubbish at the GB anchor: MRF (0.30) beats incineration (0.45).
+    # On Singapore's dirtier grid the energy-substitution credit flips the
+    # ranking — incineration becomes the nationally Optimal path.
+    baseline = rs.simulate_disposal_paths("general rubbish", 1.0)
+    assert baseline[0]["method"] == "material_recovery"
+
+    sg = rs.simulate_disposal_paths("general rubbish", 1.0, country="SG",
+                                    grid_intensity=0.408)
+    applicable = [p for p in sg if p["is_applicable"]]
+    assert applicable[0]["method"] == "incineration"     # 0.3495 < 0.5913
+    assert applicable[0]["status_tag"] == "Optimal"
 
 
 # --- weight resolution (dual-stage UX) -----------------------------------------
@@ -381,13 +510,16 @@ def test_llm_layer_enriches_fields_and_localizes_country(app, monkeypatch):
     assert "25 words" in system_prompt
     context = jsonlib.loads(captured["body"]["messages"][1]["content"])
     assert context["country"] == "MY"
-    assert context["items"][0]["paths"][0]["carbon_impact_kg"] == pytest.approx(-0.54)
+    # v3.8: the LLM sees the MY-scaled number (fallback grid 0.585, ratio
+    # 2.8261): recycling -1.08 x 2.8261 x 0.5 kg = -1.5261.
+    assert context["items"][0]["paths"][0]["carbon_impact_kg"] == \
+        pytest.approx(-1.5261, abs=1e-4)
     # Text fields replaced; numbers, ranks and method ids untouched.
     top = out["items"][0]["recommendations"][0]
     assert top["encouraging_verdict"] == "Rank 1 — nice and simple!"
     assert top["environmental_pros"] == "Saves electricity for your town."
     assert top["method"] == "recycling"
-    assert top["carbon_impact_kg"] == pytest.approx(-0.54)
+    assert top["carbon_impact_kg"] == pytest.approx(-1.5261, abs=1e-4)
     RecommendResponse(**out)
 
 

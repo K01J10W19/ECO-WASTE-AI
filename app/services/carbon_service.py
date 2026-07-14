@@ -175,6 +175,122 @@ def is_method_applicable(method: str, country) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# GRID-INTENSITY PROXY SCALING ENGINE (v3.8) — regionalizing the DMM.
+#
+# ``DISPOSAL_METHOD_FACTORS`` stays the verified structural BASELINE (its
+# EPA/BEIS-flavour literature values are treated as anchored to the GB grid,
+# BASE_GRID_INTENSITY = 0.207 kgCO2e/kWh). Instead of hunting per-country
+# waste datasets, the engine treats Climatiq as a SINGLE-DATA plugin: one
+# cached probe per country fetches the live electricity grid intensity, and
+# every disposal factor is then re-derived at runtime through three
+# HEURISTIC thermodynamic-proxy branches (grid_ratio = local / base):
+#
+#   * electricity-intensive (recycling, material_recovery):
+#         scaled = base x grid_ratio
+#     — reprocessing runs on local power; its avoided-burden credit deepens
+#       where the grid is dirty.
+#   * energy-offsettable (incineration 0.5 kWh-proxy/kg, anaerobic_digestion
+#     0.2 kWh-proxy/kg):
+#         scaled = base − yield x (local_intensity − BASE_GRID_INTENSITY)
+#     — energy-from-waste displaces local generation; dirty grids earn a
+#       bigger substitution credit, clean grids a smaller one. The credit is
+#       ANCHOR-RELATIVE because the curated base factors are already NET of
+#       energy recovery at the anchor grid — subtracting the full local
+#       intensity would double-count the credit and break anchor identity.
+#   * bio-decay (landfill weight 0.5, composting 0.3):
+#         scaled = base x (1 + (grid_ratio − 1) x weight)
+#     — grid intensity as a coarse proxy for municipal-infrastructure
+#       technology variance (gas capture, process control).
+#
+# HONESTY NOTE (report material): these are engineering proxy formulas, not
+# measured LCA deltas — grid intensity genuinely drives the first two
+# branches but is only a technology-level correlate for the third. At the
+# anchor intensity every branch collapses to the baseline factor exactly.
+#
+# Resolution ladder (NEVER raises, never blocks the ranking): live Climatiq
+# probe (cached per country) → GRID_INTENSITY_FALLBACK local averages →
+# BASE_GRID_INTENSITY (ratio 1.0). No country → baseline anchor.
+# ---------------------------------------------------------------------------
+BASE_GRID_INTENSITY = 0.207   # kgCO2e/kWh — the GB anchor the baseline factors assume
+# Climatiq activity id serving per-country electricity intensity — verified
+# LIVE 2026-07-14: resolves ALL 11 CarbIQ selector countries in ^21.
+CLIMATIQ_GRID_ACTIVITY_ID = "electricity-supply_grid-source_supplier_mix"
+# Standard country grid averages (kgCO2e/kWh) — the offline fallback map;
+# mirrors the CarbIQ selector's reference values.
+GRID_INTENSITY_FALLBACK = {
+    "MY": 0.585, "SG": 0.408, "JP": 0.462, "CN": 0.582, "IN": 0.713,
+    "US": 0.386, "GB": 0.207, "DE": 0.380, "FR": 0.056, "AU": 0.531,
+    "NZ": 0.112,
+}
+# Thermodynamic-proxy branch memberships (the 6-method universe).
+_GRID_SCALED_METHODS = frozenset({"recycling", "material_recovery"})
+_ENERGY_OFFSET_YIELD_KWH_PER_KG = {"incineration": 0.5, "anaerobic_digestion": 0.2}
+_BIO_DECAY_PENALTY_WEIGHT = {"landfill": 0.5, "composting": 0.3}
+
+
+@lru_cache(maxsize=64)
+def _fetch_climatiq_grid_intensity(country: str, api_key: str) -> float:
+    """Live kgCO2e/kWh for ``country`` via ONE cached 1-kWh Climatiq probe.
+
+    Raises on any upstream problem — ``resolve_grid_intensity`` catches and
+    falls back; this must never surface to the ranking path.
+    """
+    import requests  # local import keeps module import light for tests
+
+    resp = requests.post(
+        CLIMATIQ_ESTIMATE_URL,
+        json={
+            "emission_factor": {
+                "activity_id": CLIMATIQ_GRID_ACTIVITY_ID,
+                "data_version": CLIMATIQ_DATA_VERSION,
+                "region": country,
+            },
+            "parameters": {"energy": 1, "energy_unit": "kWh"},
+        },
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=CLIMATIQ_TIMEOUT_S,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"grid-intensity probe returned HTTP {resp.status_code}")
+    return float(resp.json()["co2e"])
+
+
+def resolve_grid_intensity(country) -> dict:
+    """
+    (intensity, ratio, source) for the country — the DMM's single upstream
+    datum. NEVER raises: live probe → local average map → baseline anchor.
+
+    Returns ``{"intensity_kg_per_kwh": f, "ratio": f, "source":
+    "climatiq" | "local_grid_map" | "baseline"}`` — ``ratio`` is
+    intensity / BASE_GRID_INTENSITY, 1.0 at the anchor (factors unchanged).
+    """
+    country = str(country or "").strip().upper()
+    if not country:
+        return {"intensity_kg_per_kwh": BASE_GRID_INTENSITY,
+                "ratio": 1.0, "source": "baseline"}
+
+    api_key = _climatiq_api_key()
+    if api_key:
+        try:
+            intensity = round(_fetch_climatiq_grid_intensity(country, api_key), 4)
+            return {"intensity_kg_per_kwh": intensity,
+                    "ratio": round(intensity / BASE_GRID_INTENSITY, 4),
+                    "source": "climatiq"}
+        except Exception as exc:  # noqa: BLE001 - the ranking must never block
+            logger.warning("Live grid intensity for %s unavailable (%s); "
+                           "using the local average map.", country, exc)
+
+    if country in GRID_INTENSITY_FALLBACK:
+        intensity = GRID_INTENSITY_FALLBACK[country]
+        return {"intensity_kg_per_kwh": intensity,
+                "ratio": round(intensity / BASE_GRID_INTENSITY, 4),
+                "source": "local_grid_map"}
+
+    return {"intensity_kg_per_kwh": BASE_GRID_INTENSITY,
+            "ratio": 1.0, "source": "baseline"}
+
+
+# ---------------------------------------------------------------------------
 # Climatiq integration (Step 5; multi-dataset material map hardened 2026-07-14).
 #
 # The estimate endpoint identifies a factor by ACTIVITY ID only — the request
@@ -514,15 +630,42 @@ def get_disposal_factor(material: str, method: str) -> float:
         ) from exc
 
 
-def estimate_disposal_impact(material: str, method: str, weight_kg: float) -> float:
+def get_scaled_disposal_factor(material: str, method: str,
+                               grid_intensity: float = None) -> float:
+    """
+    Regionalized NET per-kg factor: the GB-anchored baseline re-derived for
+    a local grid intensity through the v3.8 thermodynamic-proxy branches
+    (see the GRID-INTENSITY PROXY SCALING ENGINE block above).
+
+    ``grid_intensity`` in kgCO2e/kWh; None (or the anchor itself) returns
+    the baseline factor EXACTLY. Pure arithmetic — thread-pool safe.
+    """
+    base = get_disposal_factor(material, method)
+    gi = BASE_GRID_INTENSITY if grid_intensity is None else float(grid_intensity)
+    ratio = gi / BASE_GRID_INTENSITY
+    if method in _GRID_SCALED_METHODS:
+        return base * ratio
+    if method in _ENERGY_OFFSET_YIELD_KWH_PER_KG:
+        return base - _ENERGY_OFFSET_YIELD_KWH_PER_KG[method] * (
+            gi - BASE_GRID_INTENSITY)
+    if method in _BIO_DECAY_PENALTY_WEIGHT:
+        return base * (1.0 + (ratio - 1.0) * _BIO_DECAY_PENALTY_WEIGHT[method])
+    return base   # unknown route: defensive — serve the baseline unscaled
+
+
+def estimate_disposal_impact(material: str, method: str, weight_kg: float,
+                             grid_intensity: float = None) -> float:
     """
     Net CO2e (kg) for ``weight_kg`` of ``material`` down one end-of-life
-    route: disposal factor x weight. May be NEGATIVE (a net carbon offset).
-    Pure local arithmetic — safe for the DMM's parallel path fan-out.
+    route: (grid-scaled) disposal factor x weight. May be NEGATIVE (a net
+    carbon offset). ``grid_intensity`` omitted → the GB-anchored baseline
+    factor, byte-identical to the pre-v3.8 behaviour. Pure local
+    arithmetic — safe for the DMM's parallel path fan-out.
     """
     if weight_kg < 0:
         raise ValueError("weight_kg must be non-negative")
-    return round(get_disposal_factor(material, method) * weight_kg, 4)
+    return round(get_scaled_disposal_factor(material, method, grid_intensity)
+                 * weight_kg, 4)
 
 
 def calculate_impact(items: list, country: str = None) -> dict:

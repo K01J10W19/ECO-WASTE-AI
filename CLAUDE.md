@@ -26,11 +26,14 @@ two-stage with abstract anchors → two-stage vanilla YOLOv8 → two-stage RT-DE
 COCO-80 YOLO26-seg → blended-waste segmenter → box-detector regression (v3.2) →
 v3.5 dual-stage carbon UX + DMM → v3.6 child-friendly, country-localized LLM
 text layer over free OpenAI-compatible endpoints (local grid as the
-ever-present fallback) → **this, v3.7**: the v3.2 towers and the v3.5/v3.6
-engines unchanged, plus the NATIONAL INFRASTRUCTURE CAPABILITY MATRIX —
-country-aware disposal-path applicability (`is_applicable` flags,
-ranking/savings computed among applicable paths only, frontend
-selection-pointer pivot)). The paradigm is
+ever-present fallback) → v3.7 National Infrastructure Capability Matrix
+(country-aware `is_applicable` flags, applicable-only ranking, frontend
+selection-pointer pivot) → **this, v3.8**: the GRID-INTENSITY PROXY SCALING
+ENGINE — `DISPOSAL_METHOD_FACTORS` stays the GB-anchored (0.207 kgCO2e/kWh)
+verified baseline; ONE cached Climatiq grid-intensity probe per country
+(local average map → anchor fallback, never blocking) re-derives every
+disposal factor at runtime through three thermodynamic-proxy branches
+BEFORE the applicability filter and the ranking). The paradigm is
 **edge-native and 100% local**: two frozen local models plus a classical-CV layer,
 no cloud inference. Localization and classification are **decoupled**, and each tower
 plays its architectural strength — **CNN spatial localization for WHERE, ViT global
@@ -239,7 +242,7 @@ Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
 | Stage 1 tuning | `conf=0.15` default (per-request override) + **class-agnostic NMS** (`agnostic_nms=True, iou=0.45` — `_NMS_IOU` in `detection_service.py`) | Recall-first (Stage 2 carries per-item certainty); per-class default NMS kept duplicate cross-class boxes on one object — agnostic suppression guarantees one box per physical object (the NMS-free A/B baselines ignore the args). |
 | Carbon scaling | `estimated_carbon_kg = base x (box_area_px / γ)`, **γ = 8000** (recalibrated from 5000 for rectangular over-coverage, fill factor ~0.6) | Box area as volume/mass proxy until Step 5's real weights. |
 | Carbon provider | **Climatiq** (live, Step 5) with the **dummy per-kg coefficients** in `carbon_service.py` as the ever-present blank-key fallback | Dual-stage UX: blind local proxy at upload, audited live factors on user verification; the app never requires a key. |
-| Disposal-path matrix (DMM) | `carbon_service.DISPOSAL_METHOD_FACTORS` — 7 materials × 3 routes of NET kg CO2e/kg code constants; **credits are NEGATIVE** (offsets) | Deterministic, offline, auditable (every factor echoed in the payload); the ranking must never block on the network — live regional factors stay Module 2's audit concern. |
+| Disposal-path matrix (DMM) | `carbon_service.DISPOSAL_METHOD_FACTORS` — 7 materials × 3 routes of NET kg CO2e/kg code constants, the **GB-anchored baseline** (0.207 kgCO2e/kWh); **credits are NEGATIVE** (offsets). v3.8 re-derives per-country factors at runtime via the Grid-Intensity Proxy Scaling Engine (one cached grid probe, never-raises fallback ladder) | Deterministic, offline-capable, auditable (scaled + base factor AND the grid datum echoed in the payload); the ranking must never block on the network — live regional WASTE factors stay Module 2's audit concern. |
 | Recommendation engine | **Decision Making Module (DMM)** — rule-based 3-path parallel carbon simulation + ascending-CO2e ranking (`recommendation_service.py`); numbers are ALWAYS local | Deterministic engine is the gradeable default; must work fully with no LLM key. |
 | DMM text layer (v3.6) | **Child-Friendly, Country-Localized LLM Generation Pipeline** — one batched strict-JSON call to any free OpenAI-compatible endpoint (`LLM_API_URL`/`LLM_MODEL`, Groq default) rewrites ONLY verdict/pros/cons (1–2 sentences, ≤25 words, zero jargon, localized to `country`); local `EXPERT_KNOWLEDGE` grid (same hyper-simple register) is the default and the atomic fallback | Free-tier friendly, provider-agnostic, zero new deps (`requests`); any LLM failure degrades to `local_fallback` — recommendations never 502. |
 | Backend | **Flask** (app factory + blueprints + services) | Thin controllers, logic in services. |
@@ -503,6 +506,32 @@ Rules:
   LLM context (the LLM never rewrites a policy verdict). A profile that
   would ban an entire branch fails open (all paths applicable); no country
   → no restrictions.
+- **Grid-Intensity Proxy Scaling Engine (v3.8):** `DISPOSAL_METHOD_FACTORS`
+  is the verified structural BASELINE, anchored to the GB grid
+  (`carbon_service.BASE_GRID_INTENSITY` = 0.207 kgCO2e/kWh). Per request,
+  `resolve_grid_intensity(country)` fetches the nation's live intensity via
+  ONE cached Climatiq 1-kWh probe (`CLIMATIQ_GRID_ACTIVITY_ID` =
+  `electricity-supply_grid-source_supplier_mix`, verified live for all 11
+  selector countries) with a NEVER-RAISES ladder: live probe →
+  `GRID_INTENSITY_FALLBACK` local averages → the anchor (ratio 1.0; also
+  the no-country default, so global requests stay byte-identical to the
+  baseline). Every path factor is then re-derived in-memory
+  (`get_scaled_disposal_factor`, grid_ratio = local/base):
+  electricity-intensive (recycling, material_recovery) `base × ratio`;
+  energy-offsettable (incineration yield 0.5, anaerobic_digestion 0.2
+  kWh-proxy/kg) `base − yield × (intensity − anchor)` — ANCHOR-RELATIVE
+  because the base factors already net energy recovery at the anchor grid
+  (full-intensity subtraction would double-count and break anchor
+  identity); bio-decay (landfill 0.5, composting 0.3)
+  `base × (1 + (ratio−1) × weight)`. Every branch collapses to the
+  baseline EXACTLY at the anchor. Rank/status/savings
+  and the LLM's numbers all cascade from the SCALED values (ranks can
+  legitimately reshuffle per region — SG's dirty grid makes incineration
+  beat MRF for general rubbish); each path echoes BOTH
+  `carbon_factor_kg_per_kg` (scaled) and `base_factor_kg_per_kg`, and the
+  response carries a `grid` audit block {country, intensity, base, ratio,
+  source}. HONESTY NOTE (report material): these are engineering proxy
+  formulas, not measured LCA deltas — document them as such.
 - **Local knowledge grid (v3.6 hyper-simple register):** `EXPERT_KNOWLEDGE`
   (7×3 matrix) attaches plain-language `environmental_pros` /
   `environmental_cons` to every path — 1–2 punchy sentences, ≤25 words,
@@ -866,15 +895,19 @@ retraining), whereas CLIP's was editable text.
   server-side — item order in == item order out. Weight substitution goes
   through the shared `carbon_service.resolve_effective_weight` for BOTH
   `/api/calculate-impact` and the DMM — never fork a second copy of that rule.
-- The **DMM's NUMERIC core is local + deterministic by design**: never add
-  network calls, API keys, or Flask app-context dependence to the simulation,
-  ranking or disposal-factor lookups — live regional factors belong to
-  `POST /api/calculate-impact` (Module 2). The v3.6 LLM layer is the module's
-  ONLY network touchpoint: it may ONLY rewrite the three text fields (never
-  ranks, methods, numbers or item order), it runs once per request in the
-  request thread (never inside the path thread-pool), and EVERY failure mode
-  must degrade to the local grid with `provider: "local_fallback"` —
-  recommendations must never 502 because of the LLM.
+- The **DMM's simulation/ranking arithmetic is local + deterministic given
+  the resolved inputs**: never add network calls, API keys, or Flask
+  app-context dependence INSIDE the path thread-pool or the factor
+  arithmetic — live regional WASTE factors belong to
+  `POST /api/calculate-impact` (Module 2). The module has exactly TWO
+  sanctioned network touchpoints, both request-thread-only: (1) the v3.8
+  grid-intensity probe — ONE cached Climatiq call per country, resolved
+  BEFORE the fan-out, with a never-raises fallback ladder
+  (`GRID_INTENSITY_FALLBACK` → 0.207 anchor); recommendations must never
+  502 or block because of it; (2) the v3.6 LLM layer — it may ONLY rewrite
+  the three text fields (never ranks, methods, numbers or item order), runs
+  once per request, and EVERY failure mode must degrade to the local grid
+  with `provider: "local_fallback"`. Never move either into the workers.
 - The LLM endpoint is **OpenAI-compatible chat-completions via `requests`**
   (`LLM_API_URL`/`LLM_MODEL`/`LLM_API_KEY`) — do not add provider SDKs, and
   keep `TestingConfig.LLM_API_KEY = ""` so tests stay hermetic (LLM tests

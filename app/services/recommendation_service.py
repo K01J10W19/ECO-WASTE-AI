@@ -60,10 +60,13 @@ from concurrent.futures import ThreadPoolExecutor
 from flask import current_app, has_app_context
 
 from app.services.carbon_service import (
+    BASE_GRID_INTENSITY,
     estimate_disposal_impact,
     get_disposal_factor,
     get_national_profile,
+    get_scaled_disposal_factor,
     resolve_effective_weight,
+    resolve_grid_intensity,
 )
 from app.services.classification_service import DISPLAY_NAMES, MATERIAL_CLASSES
 from app.utils.errors import ApiError
@@ -383,12 +386,19 @@ def _build_restricted_verdict(method: str, reason: str) -> str:
 
 
 def simulate_disposal_paths(material: str, weight_kg: float, _pool=None,
-                            country: str = None) -> list:
+                            country: str = None,
+                            grid_intensity: float = None) -> list:
     """
     Fork one item into its 3 taxonomy-branched end-of-life simulations,
     evaluate them IN PARALLEL, then rank ascending by net CO2e — EXCLUSIVELY
     among the paths the ``country``'s national infrastructure actually
     operates (v3.7 applicability matrix).
+
+    ``grid_intensity`` (kgCO2e/kWh, resolved ONCE per request by the caller —
+    never inside worker threads) drives the v3.8 Grid-Intensity Proxy Scaling
+    Engine: every path's factor is re-derived from the GB-anchored baseline
+    before ranking, so rank/status/savings all cascade from the regionalized
+    numbers. None → the 0.207 anchor (baseline factors, ratio 1.0).
 
     Returns the fully annotated recommendation array: applicable paths first
     (rank 1..K ascending), then any nationally banned paths::
@@ -437,13 +447,17 @@ def simulate_disposal_paths(material: str, weight_kg: float, _pool=None,
     if _pool is None:
         with ThreadPoolExecutor(max_workers=_PARALLEL_PATHS) as pool:
             return simulate_disposal_paths(material, weight_kg, _pool=pool,
-                                           country=country)
+                                           country=country,
+                                           grid_intensity=grid_intensity)
 
+    gi = BASE_GRID_INTENSITY if grid_intensity is None else float(grid_intensity)
     methods = DISPOSAL_PATHS[material]
     # Parallel fan-out: each end-of-life path is priced concurrently by the
-    # carbon engine (pure local arithmetic — thread-safe, no app context).
+    # carbon engine at the resolved grid intensity (pure local arithmetic —
+    # thread-safe, no app context, no network inside the pool).
     co2e_values = list(_pool.map(
-        lambda method: estimate_disposal_impact(material, method, weight_kg),
+        lambda method: estimate_disposal_impact(material, method, weight_kg,
+                                                grid_intensity=gi),
         methods,
     ))
 
@@ -475,7 +489,11 @@ def simulate_disposal_paths(material: str, weight_kg: float, _pool=None,
             "status_tag": STATUS_TAGS[rank],
             "is_applicable": True,
             "restriction_reason": None,
-            "carbon_factor_kg_per_kg": get_disposal_factor(material, method),
+            # The regionalized runtime factor prices the path; the GB-anchored
+            # baseline rides along so every scaling step stays auditable.
+            "carbon_factor_kg_per_kg": round(
+                get_scaled_disposal_factor(material, method, gi), 4),
+            "base_factor_kg_per_kg": get_disposal_factor(material, method),
             "carbon_impact_kg": co2e_kg,
             "encouraging_verdict": _build_verdict(
                 rank, material, method, co2e_kg, best_co2e, worst_co2e),
@@ -484,7 +502,8 @@ def simulate_disposal_paths(material: str, weight_kg: float, _pool=None,
         })
 
     # Nationally banned paths ride LAST: numbers preserved for transparency,
-    # rank/status stripped so no consumer can mistake them for choices.
+    # rank stripped and status hard-set to "Banned" so no consumer can
+    # mistake them for choices.
     for method, co2e_kg in sorted(restricted):
         knowledge = EXPERT_KNOWLEDGE[material][method]
         ranked.append({
@@ -492,10 +511,12 @@ def simulate_disposal_paths(material: str, weight_kg: float, _pool=None,
             "method_display": METHOD_DISPLAY_NAMES.get(
                 method, method.replace("_", " ").title()),
             "rank": None,
-            "status_tag": None,
+            "status_tag": "Banned",
             "is_applicable": False,
             "restriction_reason": profile.get("reason", "not available"),
-            "carbon_factor_kg_per_kg": get_disposal_factor(material, method),
+            "carbon_factor_kg_per_kg": round(
+                get_scaled_disposal_factor(material, method, gi), 4),
+            "base_factor_kg_per_kg": get_disposal_factor(material, method),
             "carbon_impact_kg": co2e_kg,
             "encouraging_verdict": _build_restricted_verdict(
                 method, profile.get("reason", "not available")),
@@ -653,10 +674,11 @@ def recommend_for_items(items: list, country: str = None) -> dict:
     "box_area_px": float?}`` dicts (type-validated by the pydantic schema at
     the route; each needs at least one of the two size fields). ``country``
     (optional ISO alpha-2, typically the frontend's IP-geolocated default)
-    does two things: it drives the v3.7 NATIONAL INFRASTRUCTURE applicability
-    matrix (which end-of-life routes exist there at all) and it flavours the
-    v3.6 LLM text layer. The per-path CO2e arithmetic itself never changes.
-    Returns::
+    does three things: it selects the v3.8 GRID-INTENSITY scaling datum that
+    re-derives every disposal factor from the GB-anchored baseline, it
+    drives the v3.7 NATIONAL INFRASTRUCTURE applicability matrix (which
+    end-of-life routes exist there at all), and it flavours the v3.6 LLM
+    text layer. Returns::
 
         {
           "items": [
@@ -666,6 +688,8 @@ def recommend_for_items(items: list, country: str = None) -> dict:
           ],
           "summary": { item_count, optimal_total_co2e_kg,
                        worst_total_co2e_kg, max_saving_kg },
+          "grid": { country, intensity_kg_per_kwh,
+                    base_intensity_kg_per_kwh, ratio, source },
           "country": "MY" | None,
           "provider": "llm_enriched" | "local_knowledge_base" | "local_fallback"
         }
@@ -681,6 +705,12 @@ def recommend_for_items(items: list, country: str = None) -> dict:
     """
     country_code = str(country or "").strip().upper() or None
 
+    # v3.8 grid engine: the country's live grid intensity is resolved ONCE
+    # per request, in the request thread (cached Climatiq probe → local
+    # average map → 0.207 anchor; never raises, never blocks the ranking).
+    # Workers below receive only the resolved float — pure arithmetic.
+    grid = resolve_grid_intensity(country_code)
+
     results = []
     optimal_total = 0.0
     worst_total = 0.0
@@ -690,8 +720,9 @@ def recommend_for_items(items: list, country: str = None) -> dict:
         for entry in items:
             material = entry["material"]
             weight_kg, weight_source = resolve_effective_weight(entry)
-            ranked = simulate_disposal_paths(material, weight_kg, _pool=pool,
-                                             country=country_code)
+            ranked = simulate_disposal_paths(
+                material, weight_kg, _pool=pool, country=country_code,
+                grid_intensity=grid["intensity_kg_per_kwh"])
 
             # All comparative math draws STRICTLY from the applicable pool
             # (rank order: pool[0] = Optimal, pool[-1] = worst valid choice).
@@ -729,6 +760,14 @@ def recommend_for_items(items: list, country: str = None) -> dict:
             "optimal_total_co2e_kg": round(optimal_total, 4),
             "worst_total_co2e_kg": round(worst_total, 4),
             "max_saving_kg": round(worst_total - optimal_total, 4),
+        },
+        # v3.8 audit block: exactly which grid datum scaled this response.
+        "grid": {
+            "country": country_code,
+            "intensity_kg_per_kwh": grid["intensity_kg_per_kwh"],
+            "base_intensity_kg_per_kwh": BASE_GRID_INTENSITY,
+            "ratio": grid["ratio"],
+            "source": grid["source"],
         },
         "country": country_code,
         "provider": provider,

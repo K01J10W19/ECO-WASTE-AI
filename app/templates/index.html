@@ -1074,6 +1074,14 @@ async function refreshRecommendations() {
       }
     });
     $("dmm-provider").textContent = "DMM · " + data.provider.replaceAll("_", " ");
+    // v3.8 grid engine: the server echoes the exact intensity that scaled the
+    // disposal factors (live Climatiq probe or local map) — overwrite the
+    // static reference value so the profile card shows the datum in force.
+    if (data.grid) {
+      $("grid-intensity").textContent = data.grid.intensity_kg_per_kwh.toFixed(3);
+      $("geo-mode-lower").textContent = data.grid.source === "climatiq"
+        ? "live grid intensity" : ($("geo-mode-lower").textContent);
+    }
   } catch (err) {
     toast("Recommendations unavailable: " + err.message);
   }

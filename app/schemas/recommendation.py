@@ -67,11 +67,15 @@ class DisposalRecommendation(BaseModel):
     method: str                           # e.g. "recycling", "composting"
     method_display: str                   # friendly UI label
     rank: Optional[int] = Field(default=None, ge=1, le=3)   # None = banned path
-    status_tag: Optional[Literal["Optimal", "Acceptable", "Warning"]] = None
+    status_tag: Optional[Literal["Optimal", "Acceptable", "Warning",
+                                 "Banned"]] = None
     is_applicable: bool = True            # national-infrastructure verdict
     restriction_reason: Optional[str] = None   # set iff is_applicable is false
-    carbon_factor_kg_per_kg: float        # net factor; negative = credit
-    carbon_impact_kg: float               # factor x weight; may be negative
+    # v3.8: the RUNTIME grid-scaled factor prices the path; the GB-anchored
+    # baseline rides along so the scaling stays auditable per path.
+    carbon_factor_kg_per_kg: float        # regionalized net factor; neg = credit
+    base_factor_kg_per_kg: float          # GB-anchored baseline (0.207 kg/kWh)
+    carbon_impact_kg: float               # scaled factor x weight; may be negative
     encouraging_verdict: str              # rank-aware copy | fixed policy copy
     environmental_pros: str               # knowledge-base rationale
     environmental_cons: str               # knowledge-base long-term costs
@@ -99,11 +103,22 @@ class RecommendSummary(BaseModel):
     max_saving_kg: float = Field(ge=0.0)
 
 
+class GridScaling(BaseModel):
+    """v3.8 audit block: the single grid datum that scaled this response."""
+
+    country: Optional[str] = None         # None = global request (anchor used)
+    intensity_kg_per_kwh: float = Field(gt=0.0)   # resolved local intensity
+    base_intensity_kg_per_kwh: float = Field(gt=0.0)   # the GB anchor (0.207)
+    ratio: float = Field(gt=0.0)          # intensity / anchor (1.0 = baseline)
+    source: str                           # "climatiq" | "local_grid_map" | "baseline"
+
+
 class RecommendResponse(BaseModel):
     """Full JSON body returned by POST /api/recommend."""
 
     items: List[RecommendedItem]
     summary: RecommendSummary
+    grid: GridScaling                     # v3.8 grid-scaling audit block
     country: Optional[str] = None         # echoed ISO code (None = global)
     # "llm_enriched"        — v3.6 LLM text layer rewrote the literary fields
     # "local_knowledge_base" — no LLM key configured (deterministic default)
