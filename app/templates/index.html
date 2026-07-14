@@ -1205,6 +1205,24 @@ function updateTelemetry() {
 
 /* ------------------------------ item cards ------------------------------ */
 
+// Rank-based semantic ACTIVE tab styling: the selected pill's colour tells
+// the story at a glance — Optimal green, Acceptable amber, Warning rose.
+// (K applicable paths rank 1..K; anything unmapped falls back to teal.)
+const ACTIVE_TAB_CLS = {
+  1: "bg-emerald-100 text-emerald-800 border-emerald-300 font-medium",
+  2: "bg-amber-100 text-amber-800 border-amber-300 font-medium",
+  3: "bg-rose-100 text-rose-800 border-rose-300 font-medium",
+};
+
+// Golden key-data chips: wrap carbon figures ("3.5712 kg") in a highlight
+// span. Runs AFTER esc(), so LLM/local text can never inject markup — the
+// regex only wraps already-escaped digit runs. Applies uniformly to live
+// LLM responses and the local knowledge-grid fallback copy.
+function highlightNums(text) {
+  return esc(text).replace(/(\d+(?:\.\d+)?\s?kg)\b/gi,
+    '<span class="font-bold text-teal-700 bg-teal-50/80 px-1 py-0.5 rounded border border-teal-100 mx-0.5">$1</span>');
+}
+
 function tabsHtml(it) {
   const rec = state.recs[it.id];
   if (!rec) {
@@ -1215,11 +1233,14 @@ function tabsHtml(it) {
     if (!p.is_applicable) {
       // Nationally banned route: hard-disabled pill — no rank number, no
       // Optimal/Acceptable badge, struck-through label, reason on hover.
-      return `<button type="button" disabled data-process="${p.method}" title="${esc(p.restriction_reason || "Not nationally applicable")}" class="process-tab flex-1 min-w-0 rounded-full text-[11px] font-semibold py-1.5 px-1 truncate text-zinc-300 line-through opacity-50 cursor-not-allowed">✕ ${TAB_LABEL[p.method] || p.method}</button>`;
+      return `<button type="button" disabled data-process="${p.method}" title="${esc(p.restriction_reason || "Not nationally applicable")}" class="process-tab flex-1 min-w-0 rounded-full border border-transparent text-[11px] font-semibold py-1.5 px-1 truncate text-zinc-300 line-through opacity-50 cursor-not-allowed">✕ ${TAB_LABEL[p.method] || p.method}</button>`;
     }
+    // Active pill colour maps to the path's computed rank; inactive pills
+    // keep the muted gray (border-transparent = zero layout shift on select).
     const cls = p.method === selected
-      ? "bg-teal-100 text-teal-700" : "text-zinc-400 hover:text-zinc-600";
-    return `<button data-process="${p.method}" class="process-tab flex-1 min-w-0 rounded-full text-[11px] font-semibold py-1.5 px-1 truncate transition-colors duration-200 ${cls}">${p.rank}. ${TAB_LABEL[p.method] || p.method}</button>`;
+      ? (ACTIVE_TAB_CLS[p.rank] || "bg-teal-100 text-teal-700 border-teal-200 font-medium")
+      : "border-transparent font-semibold text-zinc-400 hover:text-zinc-600";
+    return `<button data-process="${p.method}" class="process-tab flex-1 min-w-0 rounded-full border text-[11px] py-1.5 px-1 truncate transition-colors duration-200 ${cls}">${p.rank}. ${TAB_LABEL[p.method] || p.method}</button>`;
   }).join("");
   const restricted = rec.recommendations.filter(p => !p.is_applicable);
   const restrictedNote = restricted.length
@@ -1238,15 +1259,15 @@ function tabsHtml(it) {
         <span class="rounded-md bg-teal-50 border border-teal-200/80 text-teal-700 font-mono-d text-[9px] tracking-[0.18em] px-2 py-1">DMM</span>
         <span class="rounded-full px-2.5 py-1 text-[10px] font-semibold ${STATUS_CLS[path.status_tag] || STATUS_CLS.Acceptable}">Rank #${path.rank} · ${esc(path.status_tag)} · ${path.carbon_impact_kg.toFixed(3)} kg</span>
       </div>
-      <p class="text-xs leading-relaxed text-zinc-500">${esc(path.encouraging_verdict)}</p>
+      <p class="text-xs leading-relaxed text-slate-700">${highlightNums(path.encouraging_verdict)}</p>
       <div class="pl-2 flex flex-col gap-1.5">
         <div class="flex items-start gap-2">
-          <span class="shrink-0 mt-0.5 w-3.5 h-3.5 rounded-full bg-teal-50 border border-teal-200/80 text-teal-600 text-[9px] font-bold flex items-center justify-center leading-none">+</span>
-          <p class="text-[11px] leading-relaxed text-zinc-500"><span class="font-semibold text-zinc-600">Pros:</span> ${esc(path.environmental_pros)}</p>
+          <span class="shrink-0 mt-0.5 w-3.5 h-3.5 rounded-full bg-emerald-50 border border-emerald-200/80 text-emerald-600 text-[9px] font-bold flex items-center justify-center leading-none">+</span>
+          <p class="text-[11px] leading-relaxed text-slate-600"><span class="font-semibold text-emerald-700">Pros:</span> ${highlightNums(path.environmental_pros)}</p>
         </div>
         <div class="flex items-start gap-2">
-          <span class="shrink-0 mt-0.5 w-3.5 h-3.5 rounded-full bg-amber-50 border border-amber-200/80 text-amber-600 text-[9px] font-bold flex items-center justify-center leading-none">–</span>
-          <p class="text-[11px] leading-relaxed text-zinc-500"><span class="font-semibold text-zinc-600">Cons:</span> ${esc(path.environmental_cons)}</p>
+          <span class="shrink-0 mt-0.5 w-3.5 h-3.5 rounded-full bg-rose-50 border border-rose-200/80 text-rose-600 text-[9px] font-bold flex items-center justify-center leading-none">–</span>
+          <p class="text-[11px] leading-relaxed text-slate-600"><span class="font-semibold text-rose-700">Cons:</span> ${highlightNums(path.environmental_cons)}</p>
         </div>
       </div>
     </div>`;
