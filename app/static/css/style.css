@@ -1,0 +1,80 @@
+/* CarbIQ — custom presentation layer (base resets, focus states, async
+   loading masks, confidence slider, GSAP hooks).
+   Tailwind utilities are applied in markup; this file holds only what
+   Tailwind cannot express. Extracted verbatim from index.html. */
+  html, body { margin: 0; padding: 0; background: #fafafa; }
+  body { font-family: 'Inter', -apple-system, ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  a { color: #0d9488; text-decoration: none; }
+  a:hover { color: #0f766e; }
+  .font-mono-d { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #e4e4e7; border-radius: 8px; }
+  ::-webkit-scrollbar-thumb:hover { background: #d4d4d8; }
+  select option { background: #ffffff; color: #18181b; }
+  /* Bi-directional focus state — mirrored by canvas bounding boxes */
+  .active-item {
+    border-color: rgba(20, 184, 166, 0.7) !important;
+    background: linear-gradient(150deg, rgba(20, 184, 166, 0.05), #ffffff 55%) !important;
+    box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.12);
+  }
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(20,184,166,0.45); }
+    50% { opacity: 0.65; box-shadow: 0 0 0 5px rgba(20,184,166,0); }
+  }
+  .pulse-dot { animation: pulse-dot 2.2s ease-in-out infinite; }
+
+  /* ===== Async loading states (pure CSS — a removed class always reverts,
+     so the UI can never wedge in a perpetual spinner) ===== */
+  @keyframes cq-spin { to { transform: rotate(360deg); } }
+  @keyframes cq-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+  .cq-ring {
+    border-radius: 9999px; border-style: solid;
+    border-color: rgba(20,184,166,0.22); border-top-color: #14b8a6;
+    animation: cq-spin 0.7s linear infinite;
+  }
+  /* Issue 1 — heavy AI scan: left canvas mask + right telemetry skeleton.
+     Driven by body.is-scanning-active (set at analyze() start, cleared in
+     its finally() — one flag, one clear point). */
+  #scan-overlay {
+    opacity: 0; visibility: hidden;
+    transition: opacity 0.4s ease, visibility 0.4s ease;
+  }
+  body.is-scanning-active #scan-overlay { opacity: 1; visibility: visible; }
+  .cq-scan-text { animation: cq-pulse 1.5s ease-in-out infinite; }
+  body.is-scanning-active .js-skel,
+  body.is-scanning-active .js-skel > * {
+    color: transparent !important;
+    background-color: #e2e8f0;           /* slate-200 skeleton bar */
+    border-radius: 0.5rem;
+    box-shadow: none !important;
+    animation: cq-pulse 1.4s ease-in-out infinite;
+  }
+  /* Issue 2 — micro grid-recalculation glass masks (footprint + items).
+     Driven by body.is-recalculating-grid; fade only, no layout shift. */
+  .recalc-mask {
+    opacity: 0; visibility: hidden;
+    transition: opacity 0.2s ease, visibility 0.2s ease;
+  }
+  body.is-recalculating-grid .recalc-mask { opacity: 1; visibility: visible; }
+
+  /* Apple-style confidence pill slider (browser-native range, restyled) */
+  #conf-slider {
+    -webkit-appearance: none; appearance: none;
+    width: 96px; height: 4px; border-radius: 999px; outline: none; cursor: pointer;
+    background: linear-gradient(90deg, #14b8a6 var(--fill, 50%), #e4e4e7 var(--fill, 50%));
+  }
+  #conf-slider::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 14px; height: 14px; border-radius: 999px; background: #ffffff;
+    border: 1px solid rgba(24,24,27,0.12); box-shadow: 0 1px 4px rgba(24,24,27,0.25);
+    transition: transform .15s ease;
+  }
+  #conf-slider::-webkit-slider-thumb:hover { transform: scale(1.15); }
+  #conf-slider::-moz-range-thumb {
+    width: 14px; height: 14px; border-radius: 999px; background: #ffffff;
+    border: 1px solid rgba(24,24,27,0.12); box-shadow: 0 1px 4px rgba(24,24,27,0.25);
+  }
+  #conf-slider::-moz-range-track { height: 4px; border-radius: 999px; background: transparent; }
+  /* GSAP orchestration hooks */
+  .gsap-root, .gsap-panel-left, .gsap-panel-right, .gsap-telemetry, .gsap-card, .gsap-stagger-item, .gsap-badge { will-change: transform, opacity; }

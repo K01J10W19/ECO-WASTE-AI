@@ -8,8 +8,10 @@ requests==2.32.3
 # NOTE: install the CUDA build of torch separately for your GTX 1650.
 # See README "GPU setup". ultralytics pulls torch automatically but the
 # CPU wheel — we override it during setup.
-# Stage 1: YOLO26-X-SEG instance segmentation (yolo26x-seg.pt). YOLO26 support
-# requires ultralytics >= 8.4 — do NOT downgrade to the old 8.3.0 pin.
+# Stage 1: the specialist waste OBJECT DETECTOR (models/yolov8n-waste-det.pt,
+# auto-fetched on first use). The >= 8.4 pin is still required: it is what
+# loads the yolo26x-seg.pt A/B baseline kept for report comparisons — do NOT
+# downgrade to the old 8.3.0 pin.
 ultralytics==8.4.90
 # NOTE: the Ultralytics CLIP fork (git+https://github.com/ultralytics/CLIP.git)
 # is NO LONGER required — it only served YOLO-World's set_classes() in the

@@ -63,6 +63,22 @@ htmlcov/
 .tox/
 
 # =============================================================================
+# Frontend tooling (defensive guards)
+# This project deliberately ships NO Node toolchain — Tailwind and GSAP are
+# vendored as static files under app/static/vendor/ (see CLAUDE.md §2). These
+# rules exist so that an ad-hoc `npm install` or Vite experiment can never
+# leak a dependency tree into the repository.
+# =============================================================================
+node_modules/
+.vite/
+.parcel-cache/
+.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# =============================================================================
 # ML artifacts & datasets (large / regenerable / licensed data — never commit)
 # =============================================================================
 ml/runs/

@@ -261,7 +261,9 @@ Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
 | Recommendation engine | **Decision Making Module (DMM)** — rule-based 3-path parallel carbon simulation + ascending-CO2e ranking (`recommendation_service.py`); numbers are ALWAYS local | Deterministic engine is the gradeable default; must work fully with no LLM key. |
 | DMM text layer (v3.6) | **Child-Friendly, Country-Localized LLM Generation Pipeline** — one batched strict-JSON call to any free OpenAI-compatible endpoint (`LLM_API_URL`/`LLM_MODEL`; any provider — Groq/Gemini/OpenRouter/Ollama) rewrites ONLY the four text fields verdict/pros/cons/`action_steps` (1–2 sentences, ≤25 words, zero jargon; a CRITICAL directive grounds them in the request country's real infrastructure); local `EXPERT_KNOWLEDGE` + `EXPERT_ACTION_STEPS` grids (same hyper-simple register) are the default and the atomic fallback | Free-tier friendly, provider-agnostic, zero new deps (`requests`); any LLM failure degrades to `local_fallback` — recommendations never 502. |
 | Backend | **Flask** (app factory + blueprints + services) | Thin controllers, logic in services. |
-| Frontend | HTML5 + Tailwind (CDN) + vanilla JS (ES6+, Fetch) + GSAP 3 (CDN); Inter/JetBrains Mono self-hosted under `app/static/assets/` | **CarbIQ SPA (Step 7, live)** — design-compiled dashboard: detection canvas ↔ item grid synced via echoed ids, IP-geolocated country select, dual-stage carbon telemetry, ranked DMM panels; `/carbon-lab` stays as the dependency-free API tester. |
+| Frontend | HTML5 + Tailwind + vanilla JS (ES6+, Fetch) + GSAP 3, **all VENDORED locally** under `app/static/vendor/` (NO CDN, NO Node/npm/Vite build step); Inter/JetBrains Mono self-hosted under `app/static/assets/` | **CarbIQ SPA (Step 7, live)** — design-compiled dashboard: detection canvas ↔ item grid synced via echoed ids, IP-geolocated country select, dual-stage carbon telemetry, ranked DMM panels; `/carbon-lab` stays as the dependency-free API tester. |
+| Frontend file layout (Step 8) | **DECOUPLED** — `templates/index.html` is semantic markup only (227 lines); presentation in `static/css/{fonts,style}.css`; behaviour in `static/js/app.js`; third-party runtime in `static/vendor/`. Bound via `url_for('static', ...)` | Separation of concerns for the examiner's audit. The split is verbatim — no behaviour was rewritten (see §15). |
+| Vendored deps (Step 8) | `static/vendor/tailwind.js` (Tailwind **Play CDN v3.4.17**, JIT runtime) + `static/vendor/gsap.min.js` (**GSAP 3.12.5**) — classic scripts, loaded in `<head>` before the deferred `app.js` | Kills the fragile CDN dependency (an offline demo or a dead CDN can no longer blank the UI) WITHOUT importing a Node toolchain. `python run.py` remains the only run step. **Do NOT migrate to npm/Vite** — it would force Node onto the examiner and add a build step to a Python FYP. |
 | Database | SQLite (optional, for scan history) | Lightweight, local, file-based. |
 
 ---
@@ -280,7 +282,7 @@ Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
   (`opencv-python-headless` — Method B: Laplacian variance + Canny edge density
   → Plasticity Index ψ), NumPy
 - **Backend:** Flask 3, Flask-SQLAlchemy, python-dotenv, requests, pydantic
-- **Frontend:** HTML5, Tailwind CSS (CDN), vanilla JavaScript (Fetch API), GSAP 3 (CDN) — the CarbIQ SPA (Canvas 2D `strokeRect` box rendering, self-hosted Inter/JetBrains Mono); `/carbon-lab` API tester stays dependency-free
+- **Frontend:** HTML5, Tailwind CSS + GSAP 3 (**vendored locally** in `app/static/vendor/` — no CDN, no Node build step), vanilla JavaScript (Fetch API) — the CarbIQ SPA (Canvas 2D `strokeRect` box rendering, self-hosted Inter/JetBrains Mono), decoupled into `templates/index.html` + `static/css/` + `static/js/`; `/carbon-lab` API tester stays dependency-free
 - **Database:** SQLite (via SQLAlchemy)
 - **External APIs:** Climatiq (carbon, Step 5) — Carbon Interface kept as alternate adapter; YouTube Data API v3 (Option-A Action-Protocol tutorials, keyless fallback)
 - **Optional:** any free OpenAI-compatible LLM endpoint (Groq / OpenRouter / Gemini compat / local Ollama) for the v3.6 DMM text layer — plain `requests`, no SDK
@@ -314,8 +316,13 @@ waste-detection-app/
 │   ├── models/scan.py     # SQLite model for optional scan history
 │   ├── schemas/           # pydantic contracts: detection.py, carbon.py, recommendation.py
 │   ├── utils/errors.py    # ApiError + register_error_handlers()
-│   ├── static/            # uploads/ + assets/ (self-hosted woff2 fonts)
-│   └── templates/         # index.html (CarbIQ SPA) · carbon_lab.html (API tester)
+│   ├── static/
+│   │   ├── assets/        # self-hosted woff2 fonts (13 files, all referenced)
+│   │   ├── css/           # fonts.css (@font-face) · style.css (custom rules)
+│   │   ├── js/            # app.js — the whole SPA behaviour layer
+│   │   ├── vendor/        # tailwind.js (Play CDN 3.4.17) · gsap.min.js (3.12.5)
+│   │   └── uploads/       # runtime user uploads (gitignored except .gitkeep)
+│   └── templates/         # index.html (semantic shell) · carbon_lab.html (API tester)
 ├── ml/                   # LEGACY training workspace — KEEP, DO NOT DELETE (FYP report)
 ├── models/               # legacy exported weights location (best.pt, gitignored)
 ├── tests/
@@ -627,9 +634,16 @@ Rules:
   point).
 
 ### Module 4 — Web Application: the CarbIQ SPA — DONE (Step 7)
-- **`templates/index.html` — the CarbIQ dashboard** (a design-tool layout
-  compiled to dependency-light vanilla JS: Tailwind CDN + GSAP 3 CDN + Fetch,
-  fonts self-hosted from `app/static/assets/`; no template runtime):
+- **The CarbIQ dashboard** (a design-tool layout compiled to dependency-light
+  vanilla JS: Tailwind + GSAP 3 + Fetch, all served locally; no template
+  runtime, no Node build step). **Decoupled in Step 8** into four files —
+  `templates/index.html` (semantic markup + `url_for` bindings only),
+  `static/css/fonts.css` (self-hosted Inter/JetBrains Mono `@font-face`),
+  `static/css/style.css` (custom rules Tailwind cannot express), and
+  `static/js/app.js` (the entire behaviour layer). Load order is load-bearing:
+  the vendored Tailwind JIT runtime and `window.gsap` are classic `<head>`
+  scripts, and `app.js` is `defer`red so its internal `DOMContentLoaded` boot
+  listener still fires. Behaviour below is unchanged by the split:
   - **Upload:** drag-drop, file picker, or live **camera capture**
     (getUserMedia → canvas → File) → `POST /api/predict`; the user's own
     pixels render immediately while the towers run. The standby drop zone
@@ -803,7 +817,8 @@ Each completed step gets its own commit + push — see §13 for the commit conve
 | 6 | DECISION MAKING MODULE (v3.5): 3-path parallel end-of-life carbon simulation (taxonomy-branched: dry recyclables / organics / residual), ascending-CO2e sorting & ranking core (Optimal / Acceptable / Warning), 7×3 disposal-factor matrix with negative offset credits, structured expert knowledge base (pros/cons) + rank-aware verdicts, `POST /api/recommend` (audited weight or box-area proxy) | **DONE** |
 | 6.5 | v3.6 DMM TEXT LAYER: Child-Friendly, Country-Localized LLM Generation Pipeline — hyper-simple system prompt (≤25 words/field, jargon banlist, numbers woven in), one batched strict-JSON call to a free OpenAI-compatible endpoint (Groq default; OpenRouter/Gemini/Ollama), `country` context injection with "global average" default, atomic staged application, seamless `local_fallback` on any failure, knowledge grid rewritten to the same simple register | **DONE** |
 | 7 | **CarbIQ SPA frontend — design-compiled Tailwind/GSAP dashboard: canvas↔grid id-synced split-screen, camera capture, IP-geolocated country defaulting, editable weights driving debounced Stage-B audits + DMM refresh, ranked process tabs, animated telemetry, self-hosted fonts** | **DONE (this step)** |
-| 8 | Full test suite, gunicorn deployment guide, FYP documentation | **Next** |
+| 8 | **CODE FREEZE prep: orphan purge (hollow `runs/`, empty `docs/`, 773 stale uploads = 183 MB), `.gitignore` hardening + secret audit (zero hardcoded keys; all via `os.getenv`), monolithic `index.html` decoupled 1872 → 227 lines (CSS → `static/css/`, JS → `static/js/app.js`), Tailwind + GSAP vendored off the CDN into `static/vendor/` (no Node)** | **DONE (this step)** |
+| 8.1 | Full test suite, gunicorn deployment guide, FYP documentation | **Next** |
 
 **Deliverables checklist — ALL CORE ITEMS COMPLETE:** multi-object upload ✓ ·
 auto bounding boxes ✓ · per-item confidence (both towers) ✓ · per-item
@@ -1028,6 +1043,23 @@ retraining), whereas CLIP's was editable text.
   hard-wire rank assumptions into `EXPERT_KNOWLEDGE` text.
 - Do not squish crops for the ViT — the processing layer's square padding exists to
   preserve aspect ratio (§2); never replace it with a naive resize.
+- **Frontend third-party code is VENDORED, not CDN'd and not npm'd.** Tailwind
+  (`app/static/vendor/tailwind.js`, Play CDN build v3.4.17) and GSAP
+  (`app/static/vendor/gsap.min.js`, v3.12.5) are committed files served by
+  Flask. Never reintroduce a `<script src="https://cdn...">` tag (a dead CDN
+  or an offline demo would blank the UI), and never migrate them to
+  npm/Vite/`package.json` — this is a Python FYP and `python run.py` must
+  stay the ONLY run step; a Node toolchain would force `npm install &&
+  npm run build` onto the examiner. `node_modules/`, `.vite/` and `dist/` are
+  gitignored purely as guards against an accidental experiment leaking in.
+- **Keep the frontend decoupled.** `templates/index.html` is semantic markup
+  and `url_for` bindings ONLY — never inline a `<style>` or `<script>` block
+  back into it; CSS belongs in `app/static/css/`, behaviour in
+  `app/static/js/app.js`. `tests/test_api.py` enforces this (it asserts the
+  bindings resolve 200, that no inline `<style>` survives, and that no CDN
+  host reappears) — if you add a new static asset, add it to `SPA_ASSETS`.
+- `app.js` must stay loaded with `defer` AFTER the vendored GSAP: it reads the
+  `window.gsap` global and its boot path is a `DOMContentLoaded` listener.
 - **Never** put business logic in route handlers — services only.
 - **Never** commit `.env`, model weights, or the dataset (`ml/data/`).
 - **Never** make tests depend on the network, weight downloads, or a GPU — mock both
