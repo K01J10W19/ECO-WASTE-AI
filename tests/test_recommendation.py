@@ -382,27 +382,31 @@ def test_grid_scaling_can_reshuffle_ranks_regionally():
 # --- weight resolution (dual-stage UX) -----------------------------------------
 
 def test_recommend_for_items_resolves_both_weight_sources():
+    # The blind item: 80,000 px box on a 1,000,000 px photo = 8% frame
+    # coverage = the reference item => exactly 0.15 kg. The DMM must price the
+    # proxy through the SAME resolution-normalised helper /calculate-impact
+    # uses, or the two endpoints would disagree about the same item.
     out = rs.recommend_for_items([
         {"material": "plastic", "weight_kg": 0.5},
-        {"material": "glass", "box_area_px": 16000.0},   # 16000 / 8000 = 2 kg
+        {"material": "glass", "box_area_px": 80_000.0, "image_area_px": 1_000_000.0},
     ])
 
     audited, blind = out["items"]
     assert audited["weight_source"] == "user_weight"
     assert audited["effective_weight_kg"] == pytest.approx(0.5)
     assert blind["weight_source"] == "box_area_proxy"
-    assert blind["effective_weight_kg"] == pytest.approx(2.0)
+    assert blind["effective_weight_kg"] == pytest.approx(0.15)
 
     # Per-item summary: best method + the worst-vs-best saving headline.
     assert audited["best_method"] == "recycling"
-    assert audited["max_saving_kg"] == pytest.approx(1.715)  # 1.175 - (-0.54)
-    assert blind["max_saving_kg"] == pytest.approx(0.68)     # 0.06 - (-0.62)
+    assert audited["max_saving_kg"] == pytest.approx(1.715)   # 1.175 - (-0.54)
+    assert blind["max_saving_kg"] == pytest.approx(0.051)     # 0.0045 - (-0.0465)
 
     # Aggregate: optimal-vs-worst totals (offsets keep totals negative-capable).
     assert out["summary"]["item_count"] == 2
-    assert out["summary"]["optimal_total_co2e_kg"] == pytest.approx(-1.16)
-    assert out["summary"]["worst_total_co2e_kg"] == pytest.approx(1.235)
-    assert out["summary"]["max_saving_kg"] == pytest.approx(2.395)
+    assert out["summary"]["optimal_total_co2e_kg"] == pytest.approx(-0.5865)
+    assert out["summary"]["worst_total_co2e_kg"] == pytest.approx(1.1795)
+    assert out["summary"]["max_saving_kg"] == pytest.approx(1.766)
     assert out["provider"] == "local_knowledge_base"
     RecommendResponse(**out)   # matches the documented contract
 

@@ -21,8 +21,10 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.services.carbon_service import PIXEL_AREA_GAMMA
 
-# Cap the blind pixel proxy at the same ceiling as user weights:
-# area / gamma <= 1000 kg (mirrors weight_kg's le=1000).
+# Upper bound on an accepted box area. This is an INPUT-SANITY ceiling only —
+# it is NOT the mass ceiling any more. The proxy weight is clamped to a
+# plausible range inside carbon_service.proxy_weight_from_area, so a huge box
+# can no longer translate into a huge mass (the v3.9 outlier fix).
 _MAX_BOX_AREA_PX = 1000.0 * PIXEL_AREA_GAMMA
 
 
@@ -33,8 +35,13 @@ class WeightedItem(BaseModel):
     material: str                                   # one of the 7-class taxonomy
     # Stage-B audited weight — wins whenever present.
     weight_kg: Optional[float] = Field(default=None, gt=0.0, le=1000.0)
-    # Stage-A blind proxy from /predict: effective weight = area / gamma.
+    # Stage-A blind proxy from /predict: the clamped geometric box area.
     box_area_px: Optional[float] = Field(default=None, gt=0.0, le=_MAX_BOX_AREA_PX)
+    # Source-photo area (width x height). OPTIONAL for back-compat, but send it
+    # whenever available: it normalises box_area_px into resolution-invariant
+    # frame COVERAGE. Without it the proxy falls back to absolute px^2, which
+    # tracks the camera's megapixel count rather than the object's real size.
+    image_area_px: Optional[float] = Field(default=None, gt=0.0)
 
     @model_validator(mode="after")
     def _require_weight_or_area(self):

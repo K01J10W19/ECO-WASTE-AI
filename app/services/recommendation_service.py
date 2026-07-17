@@ -39,8 +39,10 @@ Weight resolution mirrors the dual-stage carbon UX (the SHARED
 ``carbon_service.resolve_effective_weight`` helper — the same substitution
 ``/api/calculate-impact`` applies):
   * ``weight_kg`` present  -> user-verified weight (the precision audit value);
-  * else ``box_area_px``   -> the blind pixel proxy, box_area / gamma
-    (the same PIXEL_AREA_GAMMA calibration the /predict payload uses).
+  * else ``box_area_px``   -> the blind pixel proxy via
+    ``carbon_service.proxy_weight_from_area``: normalised against the optional
+    ``image_area_px`` into resolution-invariant frame coverage, then clamped to
+    a physically plausible mass range.
 
 DESIGN GUARANTEES (CLAUDE.md):
   * The NUMERIC core (simulation, ranking, factors) is deterministic + 100%

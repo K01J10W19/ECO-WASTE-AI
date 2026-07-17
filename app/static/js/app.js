@@ -17,6 +17,17 @@
    ========================================================================= */
 
 const GAMMA = 8000.0;               // display mirror of carbon_service.PIXEL_AREA_GAMMA
+
+// Weight-proxy mirror of carbon_service (v3.9). These MUST stay in lockstep
+// with WEIGHT_REFERENCE_* / WEIGHT_PROXY_* there: the server re-derives this
+// same number for every unedited item, so any drift here would show one weight
+// on the card while /api/calculate-impact prices a different one.
+// Coverage-based (box area / image area) is what makes it resolution-invariant
+// — absolute px² tracks the camera's megapixels, not the object.
+const W_REF_COVERAGE = 0.08;        // a mid-size consumer item fills ~8% of frame
+const W_REF_MASS_KG = 0.15;         // ...and weighs roughly 150 g
+const W_MIN_KG = 0.02;
+const W_MAX_KG = 1.50;
 const ALERT_KG = 0.12;              // per-item chip/box alert threshold (kg CO2e)
 const KM_PER_KG = 1 / 0.12;         // ~0.12 kg CO2e per petrol-car km
 const RECYCLABLE = new Set(["plastic", "glass", "metal", "cardboard", "paper"]);
@@ -70,6 +81,8 @@ const state = {
   items: [],                // /predict items (id, class_name, bbox, ...)
   weights: {},              // id -> current weight (kg)
   edited: new Set(),        // ids whose weight the user verified (Stage B)
+  included: {},             // id -> false when the user un-ticks the card
+                            // (absent = included; see isIncluded)
   audit: {},                // id -> {co2e_kg, factor, source, weight_source}
   auditMeta: { provider: null, total: 0 },
   recs: {},                 // id -> {paths: [3 ranked], provider}
@@ -121,8 +134,39 @@ async function api(path, payload, signal) {
 function meta(material) {
   return MATERIAL_META[material] || { tag: "OBJ", density: 1.0, decompose: "varies" };
 }
+// Blind Stage-A weight proxy — the exact mirror of
+// carbon_service.proxy_weight_from_area. Normalises the box against the FRAME
+// so the same object weighs the same whether it was shot at 12 MP or VGA;
+// falls back to the legacy absolute ratio only if the image dims are unknown,
+// and clamps either way so a huge box can never become a huge mass.
+function proxyWeight(it) {
+  const imgArea = state.imgW * state.imgH;
+  const kg = imgArea > 0
+    ? W_REF_MASS_KG * (Math.min(it.box_area_px / imgArea, 1) / W_REF_COVERAGE)
+    : it.box_area_px / GAMMA;
+  return +Math.min(Math.max(kg, W_MIN_KG), W_MAX_KG).toFixed(4);
+}
 function itemWeight(it) {
-  return state.weights[it.id] ?? +(it.box_area_px / GAMMA).toFixed(4);
+  return state.weights[it.id] ?? proxyWeight(it);
+}
+// The size signal an API item carries. SHARED by /calculate-impact and
+// /recommend so the two endpoints can never price the same item differently.
+function sizeSignal(it) {
+  if (state.edited.has(it.id)) return { weight_kg: state.weights[it.id] };
+  const imgArea = state.imgW * state.imgH;
+  return imgArea > 0
+    ? { box_area_px: it.box_area_px, image_area_px: imgArea }
+    : { box_area_px: it.box_area_px };
+}
+// Human-in-the-loop inclusion: unchecked items stay fully visible and audited
+// but are subtracted from every dashboard total. Default = included.
+function isIncluded(it) {
+  return state.included[it.id] !== false;
+}
+// The ACTIVE set every scoreboard metric reads from: passed the confidence
+// pill AND kept by the user's inclusion checkbox.
+function activeItems() {
+  return visibleItems().filter(isIncluded);
 }
 function itemCo2(it) {
   const a = state.audit[it.id];
@@ -307,7 +351,7 @@ async function analyze(file) {
     state.items = data.items;
     state.imgW = data.image.width;
     state.imgH = data.image.height;
-    state.weights = {}; state.edited = new Set();
+    state.weights = {}; state.edited = new Set(); state.included = {};
     state.audit = {}; state.recs = {}; state.process = {}; state.specTab = {};
     state.auditMeta = { provider: "local (γ proxy)", total: null };
     state.activeId = data.items.length
@@ -384,6 +428,7 @@ function resetWorkspace() {
     if (state.imgUrl) URL.revokeObjectURL(state.imgUrl);
     state.img = null; state.imgUrl = null; state.imgW = 0; state.imgH = 0;
     state.items = []; state.weights = {}; state.edited = new Set();
+    state.included = {};
     state.audit = {}; state.recs = {}; state.process = {}; state.specTab = {};
     state.auditMeta = { provider: null, total: null };
     state.activeId = null; state.reveal = 1;
@@ -412,9 +457,8 @@ function resetWorkspace() {
 }
 
 function impactPayloadItems() {
-  return state.items.map(it => state.edited.has(it.id)
-    ? { id: it.id, material: it.class_name, weight_kg: state.weights[it.id] }
-    : { id: it.id, material: it.class_name, box_area_px: it.box_area_px });
+  return state.items.map(it =>
+    ({ id: it.id, material: it.class_name, ...sizeSignal(it) }));
 }
 
 // SINGLE-FLIGHT dedup: each refresher keeps at most ONE request in the air.
@@ -452,9 +496,7 @@ async function refreshRecommendations() {
   const ctl = (recsCtl = new AbortController());
   try {
     const data = await api("/api/recommend", {
-      items: state.items.map(it => state.edited.has(it.id)
-        ? { material: it.class_name, weight_kg: state.weights[it.id] }
-        : { material: it.class_name, box_area_px: it.box_area_px }),
+      items: state.items.map(it => ({ material: it.class_name, ...sizeSignal(it) })),
       country: state.country,
     }, ctl.signal);
     if (ctl !== recsCtl) return;        // superseded while we were in flight
@@ -489,9 +531,11 @@ async function refreshRecommendations() {
 /* ------------------------------ telemetry ------------------------------ */
 
 function updateTelemetry() {
-  // Sums run over the VISIBLE set only — the confidence pill subtracts
-  // filtered-out items from the whole dashboard in real time.
-  const items = visibleItems();
+  // Sums run over the ACTIVE set only: items that passed the confidence pill
+  // AND that the user kept ticked. Both subtract from the whole dashboard in
+  // real time. The GSAP tween below is what makes the counter move smoothly
+  // instead of snapping, so a toggle reads as a recalculation, not a redraw.
+  const items = activeItems();
   const total = items.reduce((s, it) => s + itemCo2(it), 0);
   const mass = items.reduce((s, it) => s + itemWeight(it), 0);
   const recyclable = items.length
@@ -754,6 +798,7 @@ function cardHtml(it) {
   const weight = itemWeight(it);
   const co2 = itemCo2(it);
   const expanded = state.activeId === it.id;
+  const included = isIncluded(it);
   const alert = co2 > ALERT_KG;
   const co2Cls = alert ? (co2 > ALERT_KG * 2 ? "text-rose-500" : "text-amber-500") : "text-teal-600";
   const tileCls = alert ? "border-amber-200/80 bg-amber-50 text-amber-600"
@@ -765,8 +810,14 @@ function cardHtml(it) {
   const specTab = state.specTab[it.id] || "specs";   // sub-tab client memory
 
   return `
-  <article data-id="${it.id}" class="item-card rounded-2xl border border-zinc-300 bg-zinc-100 shadow-sm shadow-zinc-900/[0.04] cursor-pointer transition-all duration-300 hover:border-zinc-400 gsap-card gsap-stagger-item ${expanded ? "active-item p-6" : "py-2.5 px-6"}">
+  <article data-id="${it.id}" class="item-card rounded-2xl border border-zinc-300 bg-zinc-100 shadow-sm shadow-zinc-900/[0.04] cursor-pointer transition-all duration-300 hover:border-zinc-400 gsap-card gsap-stagger-item ${expanded ? "active-item p-6" : "py-2.5 px-6"} ${included ? "" : "opacity-40 grayscale-[40%]"}">
     <div class="flex items-center gap-4">
+      <!-- Human-in-the-loop inclusion gate. accent-emerald-500 is what actually
+           paints the tick: text-emerald-500 only colours a checkbox under the
+           @tailwindcss/forms plugin, which the vendored Play build omits. -->
+      <input type="checkbox" ${included ? "checked" : ""}
+             title="${included ? "Counted in the dashboard totals" : "Excluded from the dashboard totals"}"
+             class="item-inclusion-checkbox rounded text-emerald-500 accent-emerald-500 focus:ring-emerald-400 h-4 w-4 cursor-pointer transition-all shrink-0 self-start mt-3.5">
       <div class="w-11 h-11 shrink-0 self-start rounded-xl border flex items-center justify-center font-mono-d text-[11px] font-semibold ${tileCls}">${m.tag}</div>
       <div class="flex-1 min-w-0">
         <div class="flex flex-row items-center justify-between w-full gap-3">
@@ -778,18 +829,25 @@ function cardHtml(it) {
             ${expanded ? `
             <!-- Progressive-disclosure sub-tab switcher — relocated into the
                  header as a compact utility control (0-lag, client memory). -->
+            <!-- Below xl the card is too narrow to carry both text labels AND
+                 the item name: the switch collapses to its icons (title=
+                 tooltip keeps it legible) so the h3 always keeps real width. -->
             <div class="spec-switch flex flex-row items-center bg-slate-100/80 p-0.5 rounded-lg text-xs max-w-[220px] shrink-0 select-none">
-              <button data-spectab="specs" class="spec-tab rounded-md px-2.5 py-1 font-semibold whitespace-nowrap transition-all duration-200 ${specTab === "specs" ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500 hover:text-zinc-700"}">⚙️ Specs</button>
-              <button data-spectab="env" class="spec-tab rounded-md px-2.5 py-1 font-semibold whitespace-nowrap transition-all duration-200 ${specTab === "env" ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500 hover:text-zinc-700"}">📊 Impact</button>
+              <button data-spectab="specs" title="Specs" class="spec-tab rounded-md px-2 xl:px-2.5 py-1 font-semibold whitespace-nowrap transition-all duration-200 ${specTab === "specs" ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500 hover:text-zinc-700"}">⚙️<span class="hidden xl:inline"> Specs</span></button>
+              <button data-spectab="env" title="Impact" class="spec-tab rounded-md px-2 xl:px-2.5 py-1 font-semibold whitespace-nowrap transition-all duration-200 ${specTab === "env" ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500 hover:text-zinc-700"}">📊<span class="hidden xl:inline"> Impact</span></button>
             </div>` : ""}
-            <div class="text-right">
+            <div class="text-right shrink-0">
               <p class="text-lg font-extrabold tabular-nums leading-none ${co2Cls}">${co2.toFixed(3)}</p>
               <p class="mt-1 font-mono-d text-[9px] tracking-[0.18em] uppercase text-zinc-400">kg CO₂e</p>
-              ${expanded ? `<p class="mt-1 font-mono-d text-[9px] text-zinc-400 tabular-nums whitespace-nowrap">${factorLine}</p>` : ""}
             </div>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" class="shrink-0 text-zinc-400 transition-transform duration-300 ${expanded ? "rotate-180" : ""}"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
           </div>
         </div>
+        <!-- Provenance line: its own full-width row, NOT a third line inside the
+             CO₂e column. Nested there with whitespace-nowrap it forced that
+             shrink-0 column to ~254px, which starved the flex-1 title to zero
+             width and pushed the chevron outside the card border. -->
+        ${expanded ? `<p class="mt-1.5 font-mono-d text-[9px] text-zinc-400 tabular-nums text-right truncate">${factorLine}</p>` : ""}
         ${expanded ? `
         <div class="mt-3">
           <div id="panel-specs" class="${specTab === "env" ? "hidden opacity-0" : "opacity-100"} transition-all duration-300 flex flex-col space-y-2">
@@ -840,6 +898,26 @@ function renderItems() {
   list.querySelectorAll(".item-card").forEach(card => {
     const id = +card.dataset.id;
     card.addEventListener("click", () => setActive(state.activeId === id ? null : id));
+
+    // Inclusion gate — 0-lag by construction: it mutates state, repaints THIS
+    // card's classes directly and re-runs the (GSAP-tweened) totals. No
+    // renderItems() call, so the DOM is never rebuilt: no flicker, no layout
+    // shift, no lost focus, and the card's own numbers stay readable while
+    // greyed out. No network either — the audit already priced every item;
+    // inclusion is purely which rows the scoreboard sums.
+    card.querySelectorAll(".item-inclusion-checkbox").forEach(box => {
+      box.addEventListener("click", (e) => e.stopPropagation());
+      box.addEventListener("change", (e) => {
+        const on = e.target.checked;
+        state.included[id] = on;
+        card.classList.toggle("opacity-40", !on);
+        card.classList.toggle("grayscale-[40%]", !on);
+        e.target.title = on ? "Counted in the dashboard totals"
+                            : "Excluded from the dashboard totals";
+        updateTelemetry();
+        draw();          // canvas box dims/undims in lockstep with the card
+      });
+    });
 
     card.querySelectorAll(".weight-input").forEach(inp => {
       inp.addEventListener("click", (e) => e.stopPropagation());
@@ -940,14 +1018,123 @@ function switchSpecTab(card, id, tab) {
   });
 }
 
+// Which element actually scrolls the card grid. #right-panel is only a scroll
+// container from md up (`overflow-visible md:overflow-y-auto`); below that it
+// grows and the WINDOW scrolls instead. Anything that assumes one or the other
+// silently no-ops on half the breakpoints.
+const FOCUS_MARGIN = 14;        // breathing room above the anchored card (px)
+
+// Resolve the element that ACTUALLY scrolls the card grid, plus its viewport
+// box. #right-panel is only a scroll container from md up
+// (`overflow-visible md:overflow-y-auto`); below that it just grows and the
+// WINDOW scrolls instead. Anything assuming one or the other silently no-ops
+// on half the breakpoints.
+function cardScrollPort() {
+  const rp = $("right-panel");
+  if (rp && rp.scrollHeight > rp.clientHeight + 1) {
+    return {
+      el: rp,
+      top: rp.getBoundingClientRect().top,
+      height: rp.clientHeight,
+      pos: () => rp.scrollTop,
+      max: () => rp.scrollHeight - rp.clientHeight,
+      set: (v) => { rp.scrollTop = v; },
+    };
+  }
+  const doc = document.documentElement;
+  return {
+    el: null,
+    top: 0,
+    height: window.innerHeight,
+    pos: () => window.scrollY,
+    max: () => doc.scrollHeight - window.innerHeight,
+    set: (v) => window.scrollTo(0, v),
+  };
+}
+
+// One tween at a time: a second card click (or the user grabbing the wheel)
+// must supersede the first, never race it.
+let focusTween = null;
+function killFocusTween() {
+  if (focusTween) { focusTween.kill(); focusTween = null; }
+}
+
+// Bring a just-expanded card into view, GSAP-driven.
+//
+// Why not scrollIntoView({behavior:"smooth"})? Its duration and easing are
+// browser-chosen and untunable — Chrome's varies with distance and lands with a
+// flat stop. Tweening gives us a real curve (power3.out: quick departure, long
+// settle) matched to the rest of the UI's motion.
+//
+// Why not gsap.to(el, {scrollTo: ...})? ScrollToPlugin is a SEPARATE file and
+// is not in the vendored gsap.min.js — that call would silently do nothing.
+// Tweening a plain proxy and writing the value in onUpdate needs core GSAP
+// only, and works identically for an element (scrollTop) and the window
+// (scrollTo), which is exactly the md/below-md split above.
+//
+// Geometry comes from getBoundingClientRect deltas, never offsetTop: offsetTop
+// is measured against the card's offsetParent — an inner static DIV, not
+// #right-panel — which is what put the old scroll ~470px short and left the
+// expanded body below the fold.
+function focusCard(card) {
+  const port = cardScrollPort();
+  const rect = card.getBoundingClientRect();
+  const portBottom = port.top + port.height;
+
+  // "nearest" semantics, with one deliberate exception: an expanded card
+  // (chart + video + steps) is routinely TALLER than the scrollport, and a
+  // minimal scroll would then reveal almost nothing — so anchor its top and
+  // show as much as physically fits.
+  let delta;
+  if (rect.height > port.height - FOCUS_MARGIN) {
+    delta = rect.top - port.top - FOCUS_MARGIN;              // too tall: top-anchor
+  } else if (rect.top < port.top + FOCUS_MARGIN) {
+    delta = rect.top - port.top - FOCUS_MARGIN;              // above the fold
+  } else if (rect.bottom > portBottom - FOCUS_MARGIN) {
+    delta = rect.bottom - portBottom + FOCUS_MARGIN;         // below the fold
+  } else {
+    return;                                                  // already fully visible
+  }
+
+  const from = port.pos();
+  const to = Math.max(0, Math.min(from + delta, port.max()));
+  if (Math.abs(to - from) < 1) return;                       // nothing worth animating
+
+  killFocusTween();
+
+  // Reduced motion: users who switch animation off want the jump, not a ride.
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    port.set(to);
+    return;
+  }
+
+  // Distance-aware duration: a short nudge stays snappy, a long trip never
+  // drags past ~0.85s. A fixed duration would feel sluggish for 40px and
+  // frantic for 1600px.
+  const proxy = { v: from };
+  focusTween = gsap.to(proxy, {
+    v: to,
+    duration: Math.min(0.85, Math.max(0.3, Math.abs(to - from) / 1900)),
+    ease: "power3.out",
+    overwrite: true,
+    onUpdate: () => port.set(proxy.v),
+    onComplete: () => { focusTween = null; },
+  });
+}
+
 function setActive(id) {
   state.activeId = id;
   renderItems();
   draw();
+  // Collapsing must never yank the viewport — only an OPEN focuses.
   if (id != null) {
     const card = document.querySelector(`.item-card[data-id="${id}"]`);
     if (card) {
-      $("right-panel").scrollTo({ top: card.offsetTop - 24, behavior: "smooth" });
+      // One frame, not a fixed delay: renderItems() already rebuilt the DOM
+      // synchronously, so rAF lands after the browser has applied the new
+      // classes and laid the card out — the measurement focusCard() needs —
+      // without the perceptible stall a timeout would add.
+      requestAnimationFrame(() => focusCard(card));
       const body = card.querySelector(".expand-body");
       if (body) gsap.fromTo(body, { y: 10, opacity: 0 }, { y: 0, opacity: 1, duration: 0.35, ease: "power2.out" });
     }
@@ -1031,7 +1218,10 @@ function draw() {
     const w = ((it.bbox[2] - it.bbox[0]) / state.imgW) * rect.w;
     const h = ((it.bbox[3] - it.bbox[1]) / state.imgH) * rect.h;
 
-    ctx.globalAlpha = reveal;
+    // An excluded item keeps its box (it was still detected — hiding it would
+    // be dishonest) but fades in lockstep with its greyed-out card, so the
+    // canvas and the grid always tell the same story about what is counted.
+    ctx.globalAlpha = reveal * (isIncluded(it) ? 1 : 0.3);
     if (active) {
       ctx.fillStyle = hexA(color, 0.06);
       ctx.fillRect(x, y, w, h);
@@ -1065,6 +1255,13 @@ function draw() {
 /* ------------------------------ boot ------------------------------ */
 
 document.addEventListener("DOMContentLoaded", () => {
+  // The focus tween must never fight the user: any manual scroll input hands
+  // control straight back. (ScrollToPlugin's autoKill does this for you — we
+  // deliberately don't ship the plugin, so wire it by hand.) Passive listeners
+  // on window, which is where wheel/touch from the panel bubbles to anyway.
+  ["wheel", "touchstart", "keydown"].forEach((evt) =>
+    window.addEventListener(evt, killFocusTween, { passive: true }));
+
   canvas = $("detection-canvas");
   ctx = canvas.getContext("2d");
   new ResizeObserver(draw).observe(canvas);

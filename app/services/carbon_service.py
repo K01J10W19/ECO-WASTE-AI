@@ -74,6 +74,60 @@ DEFAULT_CARBON_FACTOR = 1.00
 PIXEL_AREA_GAMMA = 8000.0
 
 # ---------------------------------------------------------------------------
+# WEIGHT-PROXY calibration (v3.9) — DELIBERATELY SEPARATE FROM PIXEL_AREA_GAMMA.
+#
+# gamma above is a DIMENSIONLESS carbon multiplier: a box of exactly gamma
+# pixels scores 1x its base coefficient (base x area/gamma). Reusing that same
+# constant as a kg conversion was the MASS-OUTLIER bug — absolute px^2 scales
+# with CAMERA RESOLUTION, not with the object:
+#
+#     the SAME cup filling 40% of the frame
+#       photographed at 12 MP (4000x3000) -> 4,800,000 px^2 -> 600.00 kg
+#       photographed at VGA  (640x480)    ->   122,880 px^2 ->  15.36 kg
+#
+# A 39x swing driven by the sensor, and the schema ceiling (1000 x gamma)
+# happily admitted 1000 kg. Hence the reported ~627 kg (a 2239x2239 box).
+#
+# The proxy is therefore anchored to RELATIVE FRAME COVERAGE, which is
+# resolution-invariant — the same cup weighs the same at any megapixel count:
+#
+#     coverage  = box_area_px / image_area_px              in (0, 1]
+#     weight_kg = REFERENCE_MASS_KG x (coverage / REFERENCE_COVERAGE)
+#     weight_kg = clamp(weight_kg, MIN, MAX)
+#
+# HONESTY NOTE (report material): linear-in-coverage is an engineering proxy,
+# not measured physics, and it is deliberately material-AGNOSTIC. The UI's
+# density figures describe the MATERIAL, not the mostly-air interior of a
+# hollow container, so density-weighting a bounding box would be worse physics
+# rather than better. Real masses arrive with the Stage-B user audit, which
+# always wins over this estimate.
+WEIGHT_REFERENCE_COVERAGE = 0.08   # a mid-size consumer item fills ~8% of frame
+WEIGHT_REFERENCE_MASS_KG = 0.15    # ...and weighs roughly 150 g
+WEIGHT_PROXY_MIN_KG = 0.02         # a bottle cap / paper scrap floor
+WEIGHT_PROXY_MAX_KG = 1.50         # a frame-filling crate ceiling
+
+
+def proxy_weight_from_area(box_area_px: float, image_area_px=None) -> float:
+    """
+    Blind Stage-A weight proxy (kg) for one detected instance.
+
+    ``image_area_px`` (width x height of the source photo) is what makes the
+    estimate resolution-invariant; it is OPTIONAL only so that older clients
+    and direct API callers keep working. Without it there is no frame to
+    normalise against, so we fall back to the legacy absolute-px^2 ratio —
+    still clamped, so a missing frame reference can never re-explode the mass.
+    """
+    if image_area_px:
+        image_area_px = float(image_area_px)
+        if image_area_px > 0:
+            coverage = min(box_area_px / image_area_px, 1.0)
+            kg = WEIGHT_REFERENCE_MASS_KG * (coverage / WEIGHT_REFERENCE_COVERAGE)
+            return round(min(max(kg, WEIGHT_PROXY_MIN_KG), WEIGHT_PROXY_MAX_KG), 4)
+
+    kg = box_area_px / PIXEL_AREA_GAMMA
+    return round(min(max(kg, WEIGHT_PROXY_MIN_KG), WEIGHT_PROXY_MAX_KG), 4)
+
+# ---------------------------------------------------------------------------
 # Module 3 (Decision Making Module) — end-of-life DISPOSAL-PATH matrix.
 #
 # NET kg CO2e per kg of material for each simulated end-of-life route,
@@ -585,10 +639,11 @@ def resolve_effective_weight(entry: dict) -> tuple:
     weight substitution shared by ``/api/calculate-impact`` and the DMM.
 
     A user-verified ``weight_kg`` (the Stage-B audit value) always wins; a
-    ``box_area_px`` falls back to the blind pixel proxy, clamped box area /
-    ``PIXEL_AREA_GAMMA`` — the exact calibration the /predict payload uses.
-    At least one of the two is required (schemas enforce this too; the
-    service double-checks). ``weight_source`` is ``"user_weight"`` or
+    ``box_area_px`` falls back to the blind pixel proxy via
+    ``proxy_weight_from_area`` — coverage-normalised against the optional
+    ``image_area_px`` and clamped to a physically plausible range. At least
+    one of the two is required (schemas enforce this too; the service
+    double-checks). ``weight_source`` is ``"user_weight"`` or
     ``"box_area_proxy"`` so every response stays honest about provenance.
     """
     weight_kg = entry.get("weight_kg")
@@ -603,7 +658,8 @@ def resolve_effective_weight(entry: dict) -> tuple:
         box_area_px = float(box_area_px)
         if box_area_px <= 0:
             raise ApiError("box_area_px must be positive.", status_code=400)
-        return box_area_px / PIXEL_AREA_GAMMA, "box_area_proxy"
+        return (proxy_weight_from_area(box_area_px, entry.get("image_area_px")),
+                "box_area_proxy")
 
     raise ApiError("Each item needs weight_kg (user-verified) or box_area_px "
                    "(the blind pixel proxy).", status_code=400)
@@ -675,8 +731,8 @@ def calculate_impact(items: list, country: str = None) -> dict:
     ``items`` is a list of ``{"id": int?, "material": str, "weight_kg": float?,
     "box_area_px": float?}`` dicts (already type-validated by the pydantic
     schema at the route). Each item needs at least one size signal: a
-    user-verified ``weight_kg`` wins, otherwise ``box_area_px / gamma`` is the
-    blind pixel-proxy substitute (``resolve_effective_weight``). The optional
+    user-verified ``weight_kg`` wins, otherwise the coverage-normalised blind
+    pixel proxy substitutes (``resolve_effective_weight``). The optional
     ``id`` is the client's grid/canvas row key — echoed back VERBATIM per item
     so the split-screen UI can track edits bi-directionally. Returns::
 

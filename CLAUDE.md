@@ -255,7 +255,8 @@ Follow-up JSON calls (fed by the /predict payload; Step-7 UI wires them up):
 | Stage 2 classifier | **`edwinpalegre/ee8225-group4-vit-trashnet-enhanced`** via HF `transformers` image-classification pipeline | Supervised ViT-B/16, TrashNet-enhanced, 98.17% val acc, Apache-2.0; native 7 labels (verified) map 1:1 onto the taxonomy. |
 | Label mapping | model `trash` → system `general rubbish`; all other labels identity | `MODEL_LABEL_TO_MATERIAL` in classification_service; tests enforce full coverage. |
 | Stage 1 tuning | `conf=0.15` default (per-request override) + **class-agnostic NMS** (`agnostic_nms=True, iou=0.60` — `_NMS_AGNOSTIC`/`_NMS_IOU` in `detection_service.py`) | Recall-first (Stage 2 carries per-item certainty); agnostic suppression kills duplicate cross-class boxes on one object, iou 0.60 keeps adjacent DISTINCT items apart. Identical-item cluster merges are a nano-detector capacity limit unaffected by these knobs (only the A/B locators split them). NMS-free A/B baselines ignore the args. |
-| Carbon scaling | `estimated_carbon_kg = base x (box_area_px / γ)`, **γ = 8000** (recalibrated from 5000 for rectangular over-coverage, fill factor ~0.6) | Box area as volume/mass proxy until Step 5's real weights. |
+| Carbon scaling | `estimated_carbon_kg = base x (box_area_px / γ)`, **γ = 8000** (recalibrated from 5000 for rectangular over-coverage, fill factor ~0.6) | Box area as volume/mass proxy until Step 5's real weights. γ is a DIMENSIONLESS multiplier here — never reuse it as a kg conversion (see the row below). |
+| Weight proxy (v3.9) | **SEPARATE from γ** — `carbon_service.proxy_weight_from_area`: `weight_kg = 0.15 x (coverage / 0.08)` where `coverage = box_area_px / image_area_px`, clamped to **[0.02, 1.50] kg** (`WEIGHT_REFERENCE_MASS_KG` / `WEIGHT_REFERENCE_COVERAGE` / `WEIGHT_PROXY_MIN_KG` / `WEIGHT_PROXY_MAX_KG`) | Fixes the MASS-OUTLIER bug: absolute px² scales with CAMERA RESOLUTION, so `area/γ` priced one cup at 600 kg on a 12 MP photo vs 15 kg at VGA (39x swing) and admitted up to 1000 kg. RELATIVE frame coverage is resolution-invariant. `image_area_px` is an optional request field; without it the legacy absolute ratio is used but still clamped, so no path can re-explode. |
 | Carbon provider | **Climatiq** (live, Step 5) with the **dummy per-kg coefficients** in `carbon_service.py` as the ever-present blank-key fallback | Dual-stage UX: blind local proxy at upload, audited live factors on user verification; the app never requires a key. |
 | Disposal-path matrix (DMM) | `carbon_service.DISPOSAL_METHOD_FACTORS` — 7 materials × 3 routes of NET kg CO2e/kg code constants, the **GB-anchored baseline** (0.207 kgCO2e/kWh); **credits are NEGATIVE** (offsets). v3.8 re-derives per-country factors at runtime via the Grid-Intensity Proxy Scaling Engine (one cached grid probe, never-raises fallback ladder) | Deterministic, offline-capable, auditable (scaled + base factor AND the grid datum echoed in the payload); the ranking must never block on the network — live regional WASTE factors stay Module 2's audit concern. |
 | Recommendation engine | **Decision Making Module (DMM)** — rule-based 3-path parallel carbon simulation + ascending-CO2e ranking (`recommendation_service.py`); numbers are ALWAYS local | Deterministic engine is the gradeable default; must work fully with no LLM key. |
@@ -471,11 +472,17 @@ Rules:
     response echoes it back VERBATIM per item (never renumbered server-side)
     so the frontend performs instant bi-directional focus tracking on weight
     edits. Provided ids must be unique (schema-enforced 400 otherwise).
-  - *Pixel-proxy weight substitution:* `weight_kg` is now OPTIONAL — when
-    absent, `box_area_px / γ` (clamped geometric box area) becomes the
-    effective weight via the shared `carbon_service.resolve_effective_weight`
-    (the same helper the DMM uses); at least one size signal is required and
-    every response item labels `weight_source`
+  - *Pixel-proxy weight substitution (v3.9 — resolution-normalized):*
+    `weight_kg` is OPTIONAL — when absent the effective weight comes from
+    `carbon_service.proxy_weight_from_area` via the shared
+    `resolve_effective_weight` (the same helper the DMM uses):
+    `0.15 × (coverage / 0.08)` clamped to **[0.02, 1.50] kg**, where
+    `coverage = box_area_px / image_area_px`. Requests SHOULD carry the
+    optional `image_area_px` (the SPA sends `state.imgW × state.imgH` from the
+    /predict payload) — it is what makes the estimate resolution-invariant.
+    Omitting it falls back to the legacy absolute `box_area_px / γ`, still
+    clamped so no caller can re-trigger the mass-outlier bug. At least one size
+    signal is required and every response item labels `weight_source`
     (`user_weight` | `box_area_proxy`) plus the effective `weight_kg` priced.
   - *Graceful country defaulting:* `country` typically arrives as the
     frontend's IP-geolocated default and region-scopes the live factors;
@@ -658,11 +665,25 @@ Rules:
   - **Split-screen grid sync:** every canvas box links 1:1 to an editable
     item card via the echoed `id` — clicking either side focuses both
     (`.active-item` ring ↔ heavier stroke + tint), with smooth scroll-to.
-  - **Dual-stage carbon UX:** cards prefill the Stage-A γ proxy, then
-    `POST /api/calculate-impact` (country + ids) swaps in audited factors —
-    weight edits are debounced (650 ms) into re-audits; the card label
-    flips `proxy → verified`, and the factor line shows
-    `factor · source · weight_source`.
+  - **Dual-stage carbon UX:** cards prefill the Stage-A proxy (the
+    coverage-normalized weight, mirrored client-side by `proxyWeight()`), then
+    `POST /api/calculate-impact` (country + ids + `image_area_px`) swaps in
+    audited factors — weight edits are debounced (650 ms) into re-audits; the
+    card label flips `proxy → verified`, and the factor line shows
+    `factor · source · weight_source`. `sizeSignal(it)` builds the size half of
+    BOTH the audit and the DMM payload so the two endpoints can never price the
+    same item differently.
+  - **Human-in-the-loop inclusion gate (v3.9):** every card carries an
+    `.item-inclusion-checkbox` (ticked by default; `state.included[id] === false`
+    means excluded). Un-ticking greys the card (`opacity-40 grayscale-[40%]`),
+    fades its canvas box to 30% alpha, and subtracts the item from EVERY
+    scoreboard total — `activeItems()` (= visible ∧ included) is the single set
+    the telemetry reads. The handler is 0-lag by construction: it mutates state,
+    repaints that one card's classes and re-runs the GSAP-tweened counters —
+    NO `renderItems()`, so nothing flickers, reflows or loses focus, and no
+    network call fires (the audit already priced every item; inclusion only
+    decides which rows are summed). An excluded item keeps its own numbers
+    visible — it was still detected, and hiding that would be dishonest.
   - **Progressive-disclosure sub-tabs (per expanded card):** a compact
     ⚙️ Specs / 📊 Impact micro-switch docked in the card HEADER row
     (client-side memory in `state.specTab[id]`, pure-DOM cross-fade, ZERO
@@ -978,6 +999,30 @@ retraining), whereas CLIP's was editable text.
   `DUMMY_CARBON_FACTORS`, `DISPOSAL_METHOD_FACTORS`, `DISPOSAL_PATHS` and
   `EXPERT_KNOWLEDGE` stay in **lockstep** (§5) — tests enforce full 7×3 coverage.
 - γ (`PIXEL_AREA_GAMMA` = 8000) is a code constant in `carbon_service.py`, not env.
+- **γ and the WEIGHT proxy are two different jobs — never re-merge them.** γ is a
+  DIMENSIONLESS carbon multiplier (`base × area/γ`); the kg conversion lives in
+  `carbon_service.proxy_weight_from_area` with its own `WEIGHT_*` constants.
+  Reusing γ as kg was the v3.9 mass-outlier bug (absolute px² tracks the
+  camera's megapixels: one cup = 600 kg at 12 MP vs 15 kg at VGA; the reported
+  627 kg was a 2239² box). Changing γ to "fix" weights would instead collapse
+  every Stage-A carbon figure (γ=5e6 → carbon × 0.0016) and void the schema
+  ceiling (`_MAX_BOX_AREA_PX = 1000 × γ`). The weight proxy is deliberately
+  material-AGNOSTIC: `MATERIAL_META` densities describe the MATERIAL, not the
+  mostly-air interior of a hollow container.
+- The `app.js` constants `W_REF_COVERAGE` / `W_REF_MASS_KG` / `W_MIN_KG` /
+  `W_MAX_KG` MIRROR the server's `WEIGHT_*` constants and must change in
+  lockstep: the server re-derives the same number for every unedited item, so a
+  drift shows one weight on the card and prices another in
+  `/api/calculate-impact`. `tests/test_calculate_impact.py` pins resolution
+  invariance and the clamp.
+- **Do NOT add client-side NMS / IoU dedup.** Stage 1 already suppresses at
+  `agnostic_nms=True, iou=0.60`, so nothing in the payload can exceed IoU 0.60
+  — a client filter above that is unreachable dead code. Filtering by "same
+  material" is actively harmful: iou was RAISED to 0.60 precisely to keep
+  tightly-packed DISTINCT items (two adjacent bottles are both `plastic` and
+  may legitimately overlap ~50%). The documented failure is the OPPOSITE
+  (identical-item clusters merge into ONE box). Only the NMS-free A/B locators
+  can emit true duplicates.
 - Climatiq estimate selectors take an **activity id only** — never add
   category/sector fields to the payload (they're search-endpoint filters, the
   API ignores them). Regional coverage is dataset-scoped (BEIS→GB, EPA→US,

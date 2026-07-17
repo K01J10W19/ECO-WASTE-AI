@@ -77,20 +77,61 @@ def test_calculate_impact_echoes_client_item_ids(app):
 
 
 def test_calculate_impact_substitutes_box_area_when_weight_missing(app):
+    # 80,000 px box on a 1,000,000 px photo = 8% frame coverage = the
+    # reference item => exactly WEIGHT_REFERENCE_MASS_KG (0.15 kg).
     with app.app_context():
         app.config["CLIMATIQ_API_KEY"] = ""
         out = cs.calculate_impact(
-            [{"id": 0, "material": "plastic", "box_area_px": 16000.0},   # 2 kg proxy
+            [{"id": 0, "material": "plastic", "box_area_px": 80_000.0,
+              "image_area_px": 1_000_000.0},
              {"id": 1, "material": "plastic", "weight_kg": 0.5,
-              "box_area_px": 999999.0}])                                 # weight wins
+              "box_area_px": 999999.0, "image_area_px": 1_000_000.0}])   # weight wins
 
     proxy, audited = out["items"]
     assert proxy["weight_source"] == "box_area_proxy"
-    assert proxy["weight_kg"] == pytest.approx(2.0)              # 16000 / gamma
-    assert proxy["co2e_kg"] == pytest.approx(6.2)                # 3.10 * 2
+    assert proxy["weight_kg"] == pytest.approx(0.15)             # reference coverage
+    assert proxy["co2e_kg"] == pytest.approx(0.465)              # 3.10 * 0.15
     assert audited["weight_source"] == "user_weight"
     assert audited["weight_kg"] == pytest.approx(0.5)
     CalculateImpactResponse(**out)
+
+
+def test_proxy_weight_is_resolution_invariant(app):
+    """The v3.9 mass-outlier fix: the SAME object filling the SAME fraction of
+    the frame must weigh the same at any camera resolution. Absolute px^2 (the
+    old area/gamma rule) made this vary ~39x between a 12 MP phone and VGA,
+    which is what produced the hundreds-of-kilograms outliers."""
+    frames = [(4000 * 3000), (1920 * 1080), (640 * 480)]     # 12MP / 1080p / VGA
+    with app.app_context():
+        app.config["CLIMATIQ_API_KEY"] = ""
+        weights = []
+        for image_area in frames:
+            out = cs.calculate_impact([{
+                "id": 0, "material": "plastic",
+                "box_area_px": image_area * 0.40,             # 40% of the frame
+                "image_area_px": image_area,
+            }])
+            weights.append(out["items"][0]["weight_kg"])
+
+    assert weights[0] == pytest.approx(weights[1]) == pytest.approx(weights[2])
+    assert all(cs.WEIGHT_PROXY_MIN_KG <= w <= cs.WEIGHT_PROXY_MAX_KG for w in weights)
+
+
+def test_proxy_weight_never_explodes(app):
+    """No box — however large, with or without a frame reference — may price a
+    consumer item at an absurd mass. The old rule returned 627 kg here."""
+    huge = 5_016_000.0                       # the reported 627 kg box (2239^2)
+    with app.app_context():
+        app.config["CLIMATIQ_API_KEY"] = ""
+        framed = cs.calculate_impact([{"material": "plastic", "box_area_px": huge,
+                                       "image_area_px": 4000.0 * 3000.0}])
+        # Legacy caller that sends no frame reference still cannot explode:
+        # the clamp bounds the degraded fall-back path too.
+        legacy = cs.calculate_impact([{"material": "plastic", "box_area_px": huge}])
+
+    for out in (framed, legacy):
+        w = out["items"][0]["weight_kg"]
+        assert cs.WEIGHT_PROXY_MIN_KG <= w <= cs.WEIGHT_PROXY_MAX_KG, w
 
 
 def test_calculate_impact_requires_a_size_signal(app):
@@ -382,10 +423,14 @@ def test_endpoint_rejects_bad_payloads(client):
 
 
 def test_endpoint_grid_sync_and_proxy_flow(client):
-    # The split-screen frontend posts /predict rows verbatim: id + box area,
-    # user-audited weights where edited. Ids come back untouched, in order.
+    # The split-screen frontend posts /predict rows verbatim: id + box area +
+    # the source-photo area, user-audited weights where edited. Ids come back
+    # untouched, in order.
+    #   233,712 px box on a 1920x1080 frame = 11.3% coverage -> ~0.21 kg.
+    #   (The pre-v3.9 absolute rule priced this same box at 29.2 kg.)
     res = client.post("/api/calculate-impact", json={
-        "items": [{"id": 4, "material": "plastic", "box_area_px": 233712},
+        "items": [{"id": 4, "material": "plastic", "box_area_px": 233712,
+                   "image_area_px": 1920 * 1080},
                   {"id": 2, "material": "paper", "weight_kg": 0.005}],
     })
     assert res.status_code == 200
@@ -393,7 +438,7 @@ def test_endpoint_grid_sync_and_proxy_flow(client):
     CalculateImpactResponse(**body)
     assert [i["id"] for i in body["items"]] == [4, 2]
     assert body["items"][0]["weight_source"] == "box_area_proxy"
-    assert body["items"][0]["weight_kg"] == pytest.approx(29.214)   # 233712 / 8000
+    assert body["items"][0]["weight_kg"] == pytest.approx(0.2113, abs=1e-4)
     assert body["items"][1]["weight_source"] == "user_weight"
 
 

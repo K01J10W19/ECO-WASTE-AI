@@ -58,6 +58,15 @@
   }
   body.is-recalculating-grid .recalc-mask { opacity: 1; visibility: visible; }
 
+  /* Weight override input — strip the native number spinners. Chrome reserves
+     ~15px of intrinsic width for the steppers inside an already-tight spec
+     cell, which clipped the value itself (0.133 rendering as "0.13"). The
+     field is driven by typing (debounced into a re-audit), so the steppers
+     bought nothing and cost the digits. */
+  .weight-input::-webkit-outer-spin-button,
+  .weight-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .weight-input { -moz-appearance: textfield; appearance: textfield; }
+
   /* Apple-style confidence pill slider (browser-native range, restyled) */
   #conf-slider {
     -webkit-appearance: none; appearance: none;
