@@ -1,0 +1,34 @@
+# Keep the build context to what the server actually runs.
+.git
+.gitignore
+.venv
+venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.vscode
+.idea
+
+# Secrets — configure them as environment variables on the host instead.
+.env
+.env.*
+!.env.example
+
+# Runtime data (recreated on boot)
+instance
+*.db
+app/static/uploads/*
+!app/static/uploads/.gitkeep
+
+# Weights are fetched during the build, never copied from a dev machine.
+*.pt
+*.pth
+*.onnx
+
+# Not needed at serve time
+ml
+tests
+*.md
+!README.md
+deploy_azure.py
+.github

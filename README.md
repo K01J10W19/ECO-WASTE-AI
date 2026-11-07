@@ -118,6 +118,9 @@ auto-download from Ultralytics if you ever point `MODEL_PATH` at them.
 ├── run.py                 # entry point → python run.py
 ├── config.py              # class-based config (Dev / Prod / Testing)
 ├── requirements.txt
+├── Dockerfile             # production image (CPU torch, models baked in, gunicorn)
+├── deploy_azure.py        # one-command deploy to Azure Container Apps
+├── .github/workflows/     # builds the Docker image in the cloud → ghcr.io
 ├── .env / .env.example    # configuration (keys blank = local fallbacks)
 ├── app/                   # Flask app: factory, blueprints, services, SPA
 │   ├── blueprints/        #   api routes (/predict, /calculate-impact, /recommend, /health)
@@ -131,7 +134,46 @@ auto-download from Ultralytics if you ever point `MODEL_PATH` at them.
 
 ---
 
-## 7. Troubleshooting
+## 7. Deploy — Azure Container Apps (Azure for Students)
+
+The two models peak at about 0.9 GB of RAM, so 512 MB free web tiers (e.g. Render's)
+cannot run the app. It runs on **Azure Container Apps** at 1 vCPU / 2 GiB, scaled to
+zero when idle — covered by the Azure for Students credit (no credit card).
+
+**How it fits together:** every push to `main` that touches the app makes GitHub
+Actions build the `Dockerfile` (CPU torch, both models baked in) and publish it to
+`ghcr.io/k01j10w19/carbiq` — no local Docker needed. `deploy_azure.py` then tells
+Azure to run that image.
+
+**One-time setup**
+1. Activate [Azure for Students](https://azure.microsoft.com/free/students) with your
+   university email.
+2. Install the [Azure CLI](https://aka.ms/installazurecliwindowsx64), open a **new**
+   terminal, and run `az login`.
+3. After the first GitHub Actions build finishes (repo → **Actions** tab), check the
+   package is public: GitHub profile → **Packages** → `carbiq` → **Package settings**
+   → *Change visibility* → **Public** (Azure pulls it without a password; the image
+   contains no secrets).
+
+**Deploy / redeploy** (inside the venv):
+```powershell
+python deploy_azure.py              # app only, offline fallbacks
+python deploy_azure.py --secrets    # also copy the API keys from your .env
+```
+The script prints the app URL (`https://carbiq.<random>.southeastasia.azurecontainerapps.io`).
+To ship a change: push to `main`, wait for the Actions build, run the script again.
+
+**Behaviour:** after a period with no visitors the app scales to zero (costs nothing);
+the next visit takes about a minute while the container starts and the models load.
+Uploaded images and the SQLite scan history live on the container's temporary disk
+and reset on restart — the app is stateless by design. Live logs:
+`az containerapp logs show -n carbiq -g carbiq-rg --follow`.
+
+The same `Dockerfile` runs on any Docker host (it honours an injected `$PORT`).
+
+---
+
+## 8. Troubleshooting
 
 - **`python` opens the Microsoft Store (Windows):** use `py -3.11` explicitly.
 - **First detection is slow / needs internet:** that is the one-time ViT download.
