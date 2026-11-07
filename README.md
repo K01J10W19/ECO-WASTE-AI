@@ -50,10 +50,18 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-A ready-to-use `.env` is already included (all API keys blank → local fallbacks, so
-the app runs immediately). To enable the live Climatiq / LLM / YouTube features, paste
-your own keys into `.env` (see `.env.example` for every option). **No keys are required
-to run or grade the system.**
+`.env` holds secrets, so it is **not committed** to the repository. Create your own
+from the template (every key blank → local fallbacks, so the app runs immediately):
+
+```powershell
+copy .env.example .env        # macOS / Linux: cp .env.example .env
+```
+
+To enable the live Climatiq / LLM / YouTube features, paste your own keys into `.env`
+(see `.env.example` for every option). When **deploying to a hosting platform**, do not
+upload `.env` — set the same variables in the platform's environment-variable settings
+instead. Every setting has a safe built-in default, so the app also starts with no
+`.env` at all. **No keys are required to run or grade the system.**
 
 ---
 
